@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>KHORA — Virtual Showroom</title>
+    <meta name="description" content="Step into the KHORA showroom: inspect, pick up and turn the pieces in a 3D store with a live DJ booth." />
+    <meta name="theme-color" content="#04050a" />
+    <link rel="icon" href="textures/monogram.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas id="scene"></canvas>
+
+    <div id="intro" class="intro">
+      <div class="intro__inner">
+        <img class="intro__word" src="textures/wordmark.png" alt="KHORA" />
+        <p class="intro__sub">Virtual showroom</p>
+        <div class="intro__progress"><span id="progress"></span></div>
+        <div class="intro__actions" id="enterActions" hidden>
+          <button id="enterSound" class="btn btn--primary">Enter with sound</button>
+          <button id="enterSilent" class="btn btn--ghost">Enter muted</button>
+        </div>
+        <p class="intro__hint">Drag to look around · WASD or click the floor to walk · Click a piece to inspect it</p>
+      </div>
+    </div>
+
+    <header class="hud hud--top" id="hud" hidden>
+      <img class="hud__word" src="textures/wordmark.png" alt="KHORA" />
+      <nav class="hud__nav" aria-label="Areas">
+        <button data-goto="hero">Display</button>
+        <button data-goto="rail">Rail</button>
+        <button data-goto="booth">DJ booth</button>
+        <button data-goto="entrance">Overview</button>
+      </nav>
+      <button class="hud__sound" id="soundToggle" aria-pressed="false" title="Music">
+        <span class="eq"><i></i><i></i><i></i><i></i></span>
+        <span id="soundLabel">Sound off</span>
+      </button>
+    </header>
+
+    <aside class="panel" id="panel" hidden aria-live="polite">
+      <button class="panel__close" id="panelClose" aria-label="Close">×</button>
+      <p class="panel__eyebrow">KHORA · Drop 01</p>
+      <h1 class="panel__title">Heart Tee</h1>
+      <p class="panel__colour"><span class="swatch swatch--white"></span> White / Royal blue</p>
+      <ul class="panel__list">
+        <li>Oversized, dropped shoulder</li>
+        <li>Embroidered K♡ monogram on the chest</li>
+        <li>Royal blue thorn-heart print on the back</li>
+        <li>Woven KHORA neck label</li>
+        <li>Cotton jersey, rib collar</li>
+      </ul>
+      <div class="panel__actions">
+        <button class="btn btn--primary" id="pickBtn">Pick it up</button>
+        <button class="btn btn--ghost" id="turnBtn" hidden>Turn around</button>
+      </div>
+      <p class="panel__hint" id="panelHint">Drag the fabric to pull it. Click and hold anywhere on the shirt.</p>
+    </aside>
+
+    <div class="hint" id="hint" hidden></div>
+    <div class="reticle" id="reticle" hidden></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
