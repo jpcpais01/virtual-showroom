@@ -8,7 +8,7 @@ page.on('console', (m) => console.log('[console]', m.type(), m.text()));
 page.on('pageerror', (e) => console.log('[pageerror]', e.message));
 await page.goto(url, { timeout: 120000 });
 await page.waitForTimeout(+wait);
-try { console.log('stats', JSON.stringify(await page.evaluate(() => window.stats && window.stats()))); } catch (e) {}
+try { console.log('stats', JSON.stringify(await page.evaluate(() => (window.stats && window.stats()) || (window.__khora && window.__khora.stats())))); } catch (e) {}
 await page.screenshot({ path: out, timeout: 150000 });
 await browser.close();
 })();

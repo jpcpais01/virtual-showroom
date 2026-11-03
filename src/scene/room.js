@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
 import { concrete, gradientTex } from './textures.js';
 
 const BASE = import.meta.env.BASE_URL;
@@ -12,7 +11,6 @@ export const ROOM = { x0: -8, x1: 8, z0: -8.5, z1: 7, h: 4.8 };
  * cash desk. Returns anchors for the garments and the camera colliders.
  */
 export function buildRoom(scene, reflection) {
-  RectAreaLightUniformsLib.init();
   const loader = new THREE.TextureLoader();
   const group = new THREE.Group();
   scene.add(group);
@@ -194,10 +192,6 @@ export function buildRoom(scene, reflection) {
     arm.position.set(0.28, 2.12, s * 2.2);
     niche.add(arm);
   }
-  const nicheLight = new THREE.RectAreaLight(0x2a5cff, 3, 5.0, 3.0);
-  nicheLight.position.set(ROOM.x0 + 0.05, 1.85, -1.0);
-  nicheLight.lookAt(0, 1.85, -1.0);
-  group.add(nicheLight);
   colliders.push({ min: new THREE.Vector2(ROOM.x0, -3.9), max: new THREE.Vector2(ROOM.x0 + 1.1, 1.9) });
   const nicheHangers = [-1.0, 1.0].map((z) => {
     const m = new THREE.Matrix4().makeRotationY(Math.PI / 2);
@@ -215,9 +209,6 @@ export function buildRoom(scene, reflection) {
   wordmark.position.set(ROOM.x1 - 0.03, 2.75, -0.3);
   wordmark.rotation.y = -Math.PI / 2;
   group.add(wordmark);
-  const wmGlow = new THREE.PointLight(0x4f7bff, 3, 5, 2);
-  wmGlow.position.set(ROOM.x1 - 0.6, 2.7, -0.3);
-  group.add(wmGlow);
   // monolith cash desk with chrome top and blue under-glow
   const desk = new THREE.Group();
   desk.position.set(ROOM.x1 - 1.6, 0, -0.3);
@@ -270,20 +261,11 @@ export function buildRoom(scene, reflection) {
   }
 
   // ------------------------------------------------------------- lights
-  scene.add(new THREE.HemisphereLight(0x3a4a80, 0x08080c, 1.1));
-  // soft overhead shop light panels so the floor and fixtures read
-  for (const [x, z, w, d, c, i] of [
-    [0, 3.2, 5, 1.2, 0xdde4ff, 2.2],
-    [5.2, 0, 2.4, 4, 0xdde4ff, 1.8],
-    [-5.2, 2.6, 2.4, 3, 0xdde4ff, 1.4],
-  ]) {
-    const ra = new THREE.RectAreaLight(c, i, w, d);
-    ra.position.set(x, ROOM.h - 0.05, z);
-    ra.lookAt(x, 0, z);
-    group.add(ra);
-  }
+  // Light budget is deliberately small (every light costs on every lit pixel):
+  // hemisphere + 3 spots here, 2 follow spots + 1 point light on the stage.
+  scene.add(new THREE.HemisphereLight(0x4152a0, 0x0a0a10, 1.7));
   // hero key: neutral white so the garment colour reads true
-  const key = new THREE.SpotLight(0xfff6ee, 38, 12, 0.3, 0.7, 2);
+  const key = new THREE.SpotLight(0xfff6ee, 44, 12, 0.3, 0.7, 2);
   key.position.set(1.6, ROOM.h - 0.1, 4.4);
   key.target.position.set(0, 1.55, 1.2);
   key.castShadow = true;
@@ -294,10 +276,6 @@ export function buildRoom(scene, reflection) {
   key.shadow.camera.far = 9;
   key.shadow.radius = 3;
   group.add(key, key.target);
-  const fill = new THREE.SpotLight(0xdfe6ff, 14, 12, 0.4, 0.8, 2);
-  fill.position.set(-2.4, ROOM.h - 0.1, 3.6);
-  fill.target.position.set(0, 1.4, 1.2);
-  group.add(fill, fill.target);
   // blue rim from behind
   const rim = new THREE.SpotLight(0x2d63ff, 55, 12, 0.4, 0.6, 2);
   rim.position.set(0.4, ROOM.h - 0.1, -2.2);
@@ -311,7 +289,7 @@ export function buildRoom(scene, reflection) {
   // visible downlight cans for the spots
   const canMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.4, metalness: 0.6 });
   const lensMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xfff6ee).multiplyScalar(4) });
-  for (const l of [key, fill, rim, nk]) {
+  for (const l of [key, rim, nk]) {
     const can = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.16, 20), canMat);
     can.position.copy(l.position).add(new THREE.Vector3(0, 0.02, 0));
     group.add(can);
@@ -333,7 +311,7 @@ export function buildRoom(scene, reflection) {
     colliders,
     heroHanger,
     nicheHangers,
-    lights: { key, fill, rim, nk },
+    lights: { key, rim, nk },
     update(info) {
       for (const f of animated) f(info);
     },

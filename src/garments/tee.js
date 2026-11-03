@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Cloth } from './cloth.js';
+import { clothPool } from './clothPool.js';
 import { buildTeePattern, FRONT, BACK } from './teeMesh.js';
 
 const BASE = import.meta.env.BASE_URL;
@@ -176,7 +177,28 @@ export class Tee {
       // settle into a natural drape before the first frame
       for (let i = 0; i < 90; i++) this.cloth.step(1 / 60);
     }
+    this.ke = 1;
+    this.dirty = true;
+    this.poolId = clothPool.add(this.cloth, (r) => this._onResult(r));
     this.update(0);
+  }
+
+  _onResult(r) {
+    const c = this.cloth;
+    if (r.pos) {
+      // take the solved state, except particles the main thread is driving
+      const w = c.invMass;
+      for (let i = 0; i < c.n; i++) {
+        if (w[i] === 0) continue;
+        const k = 3 * i;
+        c.pos[k] = r.pos[k];
+        c.pos[k + 1] = r.pos[k + 1];
+        c.pos[k + 2] = r.pos[k + 2];
+      }
+      c.normals.set(r.nrm);
+    }
+    this.ke = r.ke;
+    this.dirty = true;
   }
 
   // ------------------------------------------------------------ render mesh
@@ -412,6 +434,7 @@ export class Tee {
   wake() {
     this.asleep = false;
     this.sleepTimer = 0;
+    this.ke = 1;
   }
 
   // ------------------------------------------------------------ grabbing
@@ -481,16 +504,20 @@ export class Tee {
     }
     if (wind) c.wind = wind;
     if (dt > 0 && !this.asleep) {
-      c.step(dt);
+      clothPool.request(this.poolId, dt);
       // sleep when settled on the hanger to save CPU
       if (this.state === 'hanging' && !this.grabbed && !this.alwaysAwake) {
-        if (c.kineticEnergy() < 2e-6) this.sleepTimer += dt;
+        if (this.ke < 2e-6) this.sleepTimer += dt;
         else this.sleepTimer = 0;
         if (this.sleepTimer > 1.5) this.asleep = true;
       }
     }
-    if (this.asleep && dt > 0) return;
-    c.computeNormals();
+    if (dt === 0) {
+      c.computeNormals();
+      this.dirty = true;
+    }
+    if (!this.dirty) return;
+    this.dirty = false;
     this._writeRenderMesh();
     this._writeRims();
     this._writeLabel();

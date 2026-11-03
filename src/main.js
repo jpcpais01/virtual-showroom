@@ -8,6 +8,7 @@ import { buildRoom, ROOM } from './scene/room.js';
 import { buildStage } from './scene/stage.js';
 import { FloorReflection } from './scene/reflection.js';
 import { Tee } from './garments/tee.js';
+import { clothPool } from './garments/clothPool.js';
 import { RaveAudio } from './audio.js';
 import { WalkControls } from './controls.js';
 
@@ -18,7 +19,10 @@ let quality = params.has('low') ? 0.5 : isMobile ? 0.7 : 1;
 // ---------------------------------------------------------------- renderer
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, quality < 1 ? 1.5 : 2));
+// Render resolution is the biggest GPU cost: cap at 1.5x (retina-sharp with
+// the post chain) and only multisample when we are not already supersampling.
+const pixelRatio = Math.min(devicePixelRatio, quality < 1 ? 1 : 1.5);
+renderer.setPixelRatio(pixelRatio);
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
@@ -39,7 +43,7 @@ THREE.DefaultLoadingManager.onProgress = (_u, loaded, total) => {
 const texturesReady = new Promise((res) => (THREE.DefaultLoadingManager.onLoad = res));
 
 // ---------------------------------------------------------------- world
-const reflection = new FloorReflection(quality < 1 ? 0.35 : 0.5);
+const reflection = new FloorReflection(quality < 1 ? 0.25 : 0.35);
 const room = buildRoom(scene, reflection);
 const stage = buildStage(scene);
 
@@ -77,7 +81,6 @@ const djTee = new Tee({
     },
   },
 });
-djTee.cloth.substeps = 6;
 djTee.label.visible = false;
 scene.add(djTee.group);
 const grabbables = tees;
@@ -90,7 +93,7 @@ scene.environmentIntensity = 0.45;
 // ---------------------------------------------------------------- post
 const composer = new EffectComposer(
   renderer,
-  new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: quality < 1 ? 0 : 4 }),
+  new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: pixelRatio > 1.25 ? 0 : 4 }),
 );
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.5, 0.5, 1.0);
@@ -217,9 +220,15 @@ controls.onWheel = (dy) => {
   holdDist = THREE.MathUtils.clamp(holdDist + dy * 0.0008, 0.65, 1.5);
   return true;
 };
+// hover test at most once per frame
+let hoverEv = null;
 canvas.addEventListener('pointermove', (ev) => {
-  if (grab || ev.buttons) return;
-  canvas.classList.toggle('is-hover', !!pick(ev));
+  if (grab || ev.buttons || ev.pointerType === 'touch') return;
+  if (!hoverEv) requestAnimationFrame(() => {
+    canvas.classList.toggle('is-hover', !!pick(hoverEv));
+    hoverEv = null;
+  });
+  hoverEv = ev;
 });
 
 // ---------------------------------------------------------------- UI
@@ -348,7 +357,9 @@ function updateHeld(dt) {
   held.hold(centre.clone().sub(off), centre.clone().add(off));
 }
 
+let cpuAvg = 0;
 function tick() {
+  const tStart = performance.now();
   const dt = Math.min(clock.getDelta(), 1 / 20);
   const info = audio.info();
   controls.update(dt);
@@ -370,12 +381,14 @@ function tick() {
   dj.group.updateMatrixWorld(true);
   djTee.cloth.colliders = dj.colliders();
   if (djDist < 14) djTee.update(dt, { wind: [0, 0, 0] });
+  clothPool.flush();
   room.update(info);
   if ((listenerTimer += dt) > 0.15) {
     listenerTimer = 0;
     audio.setListener(djDist);
   }
 
+  cpuAvg = cpuAvg * 0.95 + (performance.now() - tStart) * 0.05;
   reflection.update(renderer, scene, camera);
   grade.uniforms.uTime.value = t % 100;
   composer.render(dt);
@@ -387,7 +400,7 @@ function tick() {
     if (lowTimer > 3) {
       quality = 0.5;
       renderer.setPixelRatio(1);
-      reflection.scale = 0.3;
+      reflection.scale = 0.2;
       resize();
       lowTimer = 0;
     }
@@ -397,4 +410,4 @@ function tick() {
 requestAnimationFrame(tick);
 
 // debugging hooks
-window.__khora = { scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };
+window.__khora = { stats: () => ({ updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded }), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };

@@ -312,9 +312,8 @@ export function buildStage(scene) {
   const ledFrame = new THREE.Mesh(new THREE.BoxGeometry(wallW + 0.12, wallH + 0.12, 0.1), black);
   ledFrame.position.copy(led.position).add(new THREE.Vector3(0, 0, -0.06));
   group.add(ledFrame);
-  const ledLight = new THREE.RectAreaLight(0x1f55ff, 4, wallW, wallH);
-  ledLight.position.copy(led.position).add(new THREE.Vector3(0, 0, 0.05));
-  ledLight.lookAt(0, led.position.y, 0);
+  const ledLight = new THREE.PointLight(0x1f55ff, 30, 10, 1.6);
+  ledLight.position.set(0, led.position.y, z0 + 1.2);
   group.add(ledLight);
 
   // DJ booth: facade glows, deck surface for the gear
@@ -522,7 +521,7 @@ export function buildStage(scene) {
   dj.group.position.set(0, stageH, z0 + 1.9 - 0.55);
   group.add(dj.group);
 
-  const ledLightBase = 4;
+  const ledLightBase = 30;
   return {
     group,
     colliders,
