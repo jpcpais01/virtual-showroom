@@ -20,12 +20,12 @@ const { chromium } = require('playwright');
     if (s.startsWith('cam:')) {
       // cam:x:y:z:yaw:pitch:name:wait
       const [, x, y, z, yaw, pitch, name, wait] = s.split(':');
-      await page.evaluate(([x, y, z, yaw, pitch]) => { const c = window.__khora.controls; c.fly = null; c.pos.set(x, y, z); c.yaw = yaw; c.pitch = pitch; }, [+x, +y, +z, +yaw, +pitch]);
+      await page.evaluate(([x, y, z, yaw, pitch]) => { const c = window.__khora.controls; c.fly = null; c.pos.set(x, y, z); c.yaw = c.yawT = yaw; c.pitch = c.pitchT = pitch; }, [+x, +y, +z, +yaw, +pitch]);
       await page.waitForTimeout(+(wait || 5000));
       await shot(name);
     }
     if (s === 'hold') {
-      await page.evaluate(() => { const K = window.__khora; K.focus(K.hero); const c = K.controls; c.fly = null; c.pos.copy(K.spots.hero.pos); c.yaw = 0; c.pitch = -0.02; });
+      await page.evaluate(() => { const K = window.__khora; K.focus(K.hero); const c = K.controls; c.fly = null; c.pos.copy(K.spots.hero.pos); c.yaw = c.yawT = 0; c.pitch = c.pitchT = -0.02; });
       await page.waitForTimeout(3000);
       await page.evaluate(() => window.__khora.pickUp());
       await page.waitForTimeout(+(process.env.HOLDWAIT || 30000));

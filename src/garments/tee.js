@@ -64,8 +64,11 @@ function makeFabricMaterial(tex, { inside = false } = {}) {
  * A simulated KHORA tee hanging on a hanger. World-space simulation.
  */
 export class Tee {
+  /** static world colliders (walls, furniture) shared by every garment */
+  static environment = [];
+
   constructor({ renderer, hangerMatrix, name = 'tee', quality = 1, worn = null }) {
-    if (!sharedPattern) sharedPattern = buildTeePattern(0.028);
+    if (!sharedPattern) sharedPattern = buildTeePattern(0.024);
     const pat = sharedPattern;
     this.pat = pat;
     this.name = name;
@@ -205,47 +208,77 @@ export class Tee {
   _buildRenderMesh(tris, triPanel) {
     const pat = this.pat;
     const W = pat.pattern.window;
-    const uvOf = (x, y, panel) => {
+    const uvOf = (i, panel) => {
+      const { x, y } = pat.verts[i];
       const u = panel === BACK ? 0.5 + ((W.x1 - x) / (W.x1 - W.x0)) * 0.5 : ((x - W.x0) / (W.x1 - W.x0)) * 0.5;
-      const v = (y - W.y0) / (W.y1 - W.y0);
-      return [u, v];
+      return [u, (y - W.y0) / (W.y1 - W.y0)];
     };
-    // render vertices keyed by (simVertex, panel) and (edge, panel); each sim
-    // triangle is split 1->4 with Phong-tessellated edge midpoints.
+    // The render mesh is much denser than the simulation mesh: every sim
+    // triangle is split into SUB x SUB triangles evaluated on a Phong-
+    // tessellated curved surface, so folds and silhouettes stay smooth while
+    // physics runs on the coarser mesh. Points on a shared edge depend only on
+    // that edge, so neighbouring triangles always meet without cracks.
+    const SUB = this.quality > 0.7 ? 3 : 2;
     const keyMap = new Map();
-    const rv = []; // {type:0 vertex|1 mid, a, b, panel}
+    const A = [], B = [], C = [], WA = [], WB = [], WC = [];
     const uvs = [];
-    const get = (type, a, b, panel) => {
-      const key = type === 0 ? `v${a}_${panel}` : `e${Math.min(a, b)}_${Math.max(a, b)}_${panel}`;
+    const vert = (key, a, b, c, u, v, w, panel) => {
       let id = keyMap.get(key);
-      if (id === undefined) {
-        id = rv.length;
-        keyMap.set(key, id);
-        rv.push({ type, a, b, panel });
-        if (type === 0) uvs.push(...uvOf(pat.verts[a].x, pat.verts[a].y, panel));
-        else {
-          const [u1, v1] = uvOf(pat.verts[a].x, pat.verts[a].y, panel);
-          const [u2, v2] = uvOf(pat.verts[b].x, pat.verts[b].y, panel);
-          uvs.push((u1 + u2) / 2, (v1 + v2) / 2);
-        }
-      }
+      if (id !== undefined) return id;
+      id = A.length;
+      keyMap.set(key, id);
+      A.push(a); B.push(b); C.push(c); WA.push(u); WB.push(v); WC.push(w);
+      const ua = uvOf(a, panel), ub = uvOf(b, panel), uc = uvOf(c, panel);
+      uvs.push(u * ua[0] + v * ub[0] + w * uc[0], u * ua[1] + v * ub[1] + w * uc[1]);
       return id;
     };
+    const point = (a, b, c, i, j, panel, t) => {
+      const N = SUB;
+      const v = i / N, w = j / N, u = 1 - v - w;
+      // corners
+      if (u === 1) return vert(`v${a}_${panel}`, a, a, a, 1, 0, 0, panel);
+      if (v === 1) return vert(`v${b}_${panel}`, b, b, b, 1, 0, 0, panel);
+      if (w === 1) return vert(`v${c}_${panel}`, c, c, c, 1, 0, 0, panel);
+      // edges: key by the edge's lower index so both triangles agree
+      const edge = (p, q, tq) => {
+        const lo = Math.min(p, q), hi = Math.max(p, q);
+        const k = Math.round((p === lo ? tq : 1 - tq) * N); // steps from lo
+        return vert(`e${lo}_${hi}_${k}_${panel}`, lo, hi, hi, 1 - k / N, k / N, 0, panel);
+      };
+      if (w === 0) return edge(a, b, v);
+      if (v === 0) return edge(a, c, w);
+      if (u < 1e-9) return edge(b, c, w);
+      return vert(`t${t}_${i}_${j}`, a, b, c, u, v, w, panel);
+    };
     const index = [];
+    const faceSim = [];
     for (let t = 0; t < tris.length; t += 3) {
       const p = triPanel[t / 3];
       const [a, b, c] = [tris[t], tris[t + 1], tris[t + 2]];
-      const A = get(0, a, a, p), B = get(0, b, b, p), C = get(0, c, c, p);
-      const AB = get(1, a, b, p), BC = get(1, b, c, p), CA = get(1, c, a, p);
-      index.push(A, AB, CA, AB, B, BC, CA, BC, C, AB, BC, CA);
+      const g = [];
+      for (let i = 0; i <= SUB; i++) {
+        g[i] = [];
+        for (let j = 0; j <= SUB - i; j++) g[i][j] = point(a, b, c, i, j, p, t);
+      }
+      for (let i = 0; i < SUB; i++) {
+        for (let j = 0; j < SUB - i; j++) {
+          index.push(g[i][j], g[i + 1][j], g[i][j + 1]);
+          faceSim.push(t / 3);
+          if (i + j < SUB - 1) {
+            index.push(g[i + 1][j], g[i + 1][j + 1], g[i][j + 1]);
+            faceSim.push(t / 3);
+          }
+        }
+      }
     }
-    this.rv = rv;
-    this.rvA = new Uint32Array(rv.map((r) => r.a));
-    this.rvB = new Uint32Array(rv.map((r) => r.b));
-    this.rvMid = new Uint8Array(rv.map((r) => r.type));
+    this.simTris = tris;
+    this.faceSim = new Uint32Array(faceSim);
+    this.rA = new Uint32Array(A); this.rB = new Uint32Array(B); this.rC = new Uint32Array(C);
+    this.wA = new Float32Array(WA); this.wB = new Float32Array(WB); this.wC = new Float32Array(WC);
+    const n = A.length;
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(rv.length * 3), 3).setUsage(THREE.DynamicDrawUsage));
-    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(rv.length * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * 3), 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geo.setIndex(index);
     this.geometry = geo;
@@ -333,7 +366,7 @@ export class Tee {
       const b = pts[Math.min(i + 5, pts.length - 1)].clone().applyMatrix4(this.hangerMatrix);
       this.hangerColliders.push({ type: 'capsule', a: a.toArray(), b: b.toArray(), r: 0.024 });
     }
-    this.cloth.colliders = this.hangerColliders;
+    this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
     const arm = new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.009, 12, false), body);
     arm.castShadow = true;
     g.add(arm);
@@ -393,7 +426,7 @@ export class Tee {
     this.wake();
     if (this.state === 'hanging' || this.state === 'returning') {
       this.releaseFromHanger();
-      this.cloth.colliders = [];
+      this.cloth.colliders = [...Tee.environment];
       this.state = 'held';
     }
     const [ia, ib] = this.pat.holdIds;
@@ -426,7 +459,7 @@ export class Tee {
   returnToHanger() {
     this.wake();
     this.state = 'returning';
-    this.cloth.colliders = this.hangerColliders;
+    this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
     for (const id of this.pat.holdIds) this.cloth.unpin(id);
     this._pinToHanger(false);
   }
@@ -467,20 +500,16 @@ export class Tee {
 
   /** nearest sim particle to a raycast hit on the render mesh */
   particleFromHit(hit) {
-    const fi = hit.faceIndex;
-    const idx = this.geometry.index.array;
+    const t = this.faceSim[hit.faceIndex] * 3;
+    const p = this.cloth.pos;
     let best = -1;
     let bd = Infinity;
-    const p = this.cloth.pos;
     for (let k = 0; k < 3; k++) {
-      const r = idx[fi * 3 + k];
-      const cand = this.rvMid[r] ? [this.rvA[r], this.rvB[r]] : [this.rvA[r]];
-      for (const id of cand) {
-        const d = hit.point.distanceToSquared(new THREE.Vector3(p[3 * id], p[3 * id + 1], p[3 * id + 2]));
-        if (d < bd) {
-          bd = d;
-          best = id;
-        }
+      const id = this.simTris[t + k];
+      const d = hit.point.distanceToSquared(new THREE.Vector3(p[3 * id], p[3 * id + 1], p[3 * id + 2]));
+      if (d < bd) {
+        bd = d;
+        best = id;
       }
     }
     return best;
@@ -528,27 +557,29 @@ export class Tee {
     const nrm = this.geometry.attributes.normal.array;
     const P = this.cloth.pos;
     const Nn = this.cloth.normals;
-    const A = this.rvA, B = this.rvB, M = this.rvMid;
-    const alpha = 0.6; // phong tessellation shape factor
-    for (let r = 0, n = A.length; r < n; r++) {
-      const a = 3 * A[r];
+    const RA = this.rA, RB = this.rB, RC = this.rC, WA = this.wA, WB = this.wB, WC = this.wC;
+    const alpha = 0.65; // Phong tessellation shape factor
+    for (let r = 0, n = RA.length; r < n; r++) {
+      const a = 3 * RA[r], b = 3 * RB[r], c = 3 * RC[r];
+      const u = WA[r], v = WB[r], w = WC[r];
       const k = 3 * r;
-      if (!M[r]) {
-        pos[k] = P[a]; pos[k + 1] = P[a + 1]; pos[k + 2] = P[a + 2];
-        nrm[k] = Nn[a]; nrm[k + 1] = Nn[a + 1]; nrm[k + 2] = Nn[a + 2];
-        continue;
-      }
-      const b = 3 * B[r];
-      const mx = (P[a] + P[b]) * 0.5, my = (P[a + 1] + P[b + 1]) * 0.5, mz = (P[a + 2] + P[b + 2]) * 0.5;
-      // project the midpoint onto the tangent planes of both ends and blend
-      const da = (mx - P[a]) * Nn[a] + (my - P[a + 1]) * Nn[a + 1] + (mz - P[a + 2]) * Nn[a + 2];
-      const db = (mx - P[b]) * Nn[b] + (my - P[b + 1]) * Nn[b + 1] + (mz - P[b + 2]) * Nn[b + 2];
-      pos[k] = mx - 0.5 * alpha * (da * Nn[a] + db * Nn[b]);
-      pos[k + 1] = my - 0.5 * alpha * (da * Nn[a + 1] + db * Nn[b + 1]);
-      pos[k + 2] = mz - 0.5 * alpha * (da * Nn[a + 2] + db * Nn[b + 2]);
-      let nx = Nn[a] + Nn[b], ny = Nn[a + 1] + Nn[b + 1], nz = Nn[a + 2] + Nn[b + 2];
-      const l = Math.hypot(nx, ny, nz) || 1;
-      nrm[k] = nx / l; nrm[k + 1] = ny / l; nrm[k + 2] = nz / l;
+      const px = u * P[a] + v * P[b] + w * P[c];
+      const py = u * P[a + 1] + v * P[b + 1] + w * P[c + 1];
+      const pz = u * P[a + 2] + v * P[b + 2] + w * P[c + 2];
+      // distance of the flat point to each corner's tangent plane
+      const da = (px - P[a]) * Nn[a] + (py - P[a + 1]) * Nn[a + 1] + (pz - P[a + 2]) * Nn[a + 2];
+      const db = (px - P[b]) * Nn[b] + (py - P[b + 1]) * Nn[b + 1] + (pz - P[b + 2]) * Nn[b + 2];
+      const dc = (px - P[c]) * Nn[c] + (py - P[c + 1]) * Nn[c + 1] + (pz - P[c + 2]) * Nn[c + 2];
+      pos[k] = px - alpha * (u * da * Nn[a] + v * db * Nn[b] + w * dc * Nn[c]);
+      pos[k + 1] = py - alpha * (u * da * Nn[a + 1] + v * db * Nn[b + 1] + w * dc * Nn[c + 1]);
+      pos[k + 2] = pz - alpha * (u * da * Nn[a + 2] + v * db * Nn[b + 2] + w * dc * Nn[c + 2]);
+      const nx = u * Nn[a] + v * Nn[b] + w * Nn[c];
+      const ny = u * Nn[a + 1] + v * Nn[b + 1] + w * Nn[c + 1];
+      const nz = u * Nn[a + 2] + v * Nn[b + 2] + w * Nn[c + 2];
+      const l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+      nrm[k] = nx / l;
+      nrm[k + 1] = ny / l;
+      nrm[k + 2] = nz / l;
     }
     this.geometry.attributes.position.needsUpdate = true;
     this.geometry.attributes.normal.needsUpdate = true;

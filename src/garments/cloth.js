@@ -334,6 +334,25 @@ export class Cloth {
           pos[k + 1] = c.c[1] + dy * s;
           pos[k + 2] = c.c[2] + dz * s;
         }
+      } else if (c.type === 'box') {
+        // axis-aligned box (walls, plinth, booth...): push out of the nearest face
+        const x0 = c.min[0] - pad, y0 = c.min[1] - pad, z0 = c.min[2] - pad;
+        const x1 = c.max[0] + pad, y1 = c.max[1] + pad, z1 = c.max[2] + pad;
+        for (let i = 0; i < n; i++) {
+          if (w[i] === 0) continue;
+          const k = 3 * i;
+          const x = pos[k], y = pos[k + 1], z = pos[k + 2];
+          if (x <= x0 || x >= x1 || y <= y0 || y >= y1 || z <= z0 || z >= z1) continue;
+          let d = x - x0, ax = 0, to = x0;
+          if (x1 - x < d) { d = x1 - x; to = x1; }
+          if (y - y0 < d) { d = y - y0; ax = 1; to = y0; }
+          if (y1 - y < d) { d = y1 - y; ax = 1; to = y1; }
+          if (z - z0 < d) { d = z - z0; ax = 2; to = z0; }
+          if (z1 - z < d) { d = z1 - z; ax = 2; to = z1; }
+          pos[k + ax] = to;
+          // surface friction on the other two axes
+          for (let a = 0; a < 3; a++) if (a !== ax) pos[k + a] = prev[k + a] + (pos[k + a] - prev[k + a]) * 0.5;
+        }
       } else if (c.type === 'capsule') {
         const ax = c.a[0], ay = c.a[1], az = c.a[2];
         const bx = c.b[0] - ax, by = c.b[1] - ay, bz = c.b[2] - az;

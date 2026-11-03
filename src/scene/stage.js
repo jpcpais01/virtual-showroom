@@ -222,16 +222,19 @@ export class DJMannequin {
   colliders() {
     const m = this.upper.matrixWorld;
     const v = (x, y, z) => new THREE.Vector3(x, y, z).applyMatrix4(m).toArray();
+    // radii are a little larger than the visible body so the fabric (and the
+    // triangles between its particles) stays clear of the skin
     const out = [
-      { type: 'capsule', a: v(-0.065, 1.0, 0), b: v(-0.07, 1.33, 0), r: 0.105 },
-      { type: 'capsule', a: v(0.065, 1.0, 0), b: v(0.07, 1.33, 0), r: 0.105 },
-      { type: 'capsule', a: v(-0.19, 1.39, 0), b: v(0.19, 1.39, 0), r: 0.065 },
-      { type: 'capsule', a: v(0, 1.4, 0), b: v(0, 1.56, 0), r: 0.055 },
+      { type: 'capsule', a: v(-0.065, 0.98, 0), b: v(-0.07, 1.34, 0), r: 0.128 },
+      { type: 'capsule', a: v(0.065, 0.98, 0), b: v(0.07, 1.34, 0), r: 0.128 },
+      { type: 'capsule', a: v(-0.2, 1.4, 0), b: v(0.2, 1.4, 0), r: 0.082 },
+      { type: 'capsule', a: v(0, 1.38, 0), b: v(0, 1.62, 0), r: 0.072 },
+      { type: 'sphere', c: v(0, 1.69, 0.0), r: 0.135 },
     ];
     for (const arm of this.arms) {
       const w = (p) => p.clone().applyMatrix4(m).toArray();
-      out.push({ type: 'capsule', a: w(arm.shoulder), b: w(arm.elbow), r: 0.05 });
-      out.push({ type: 'capsule', a: w(arm.elbow), b: w(arm.wrist), r: 0.042 });
+      out.push({ type: 'capsule', a: w(arm.shoulder), b: w(arm.elbow), r: 0.064 });
+      out.push({ type: 'capsule', a: w(arm.elbow), b: w(arm.wrist), r: 0.054 });
     }
     return out;
   }

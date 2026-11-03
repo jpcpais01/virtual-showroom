@@ -47,6 +47,21 @@ const reflection = new FloorReflection(quality < 1 ? 0.25 : 0.35);
 const room = buildRoom(scene, reflection);
 const stage = buildStage(scene);
 
+// solid things the cloth must not pass through when you pull or carry it
+{
+  const z0 = ROOM.z0;
+  Tee.environment = [
+    [[-50, -1, -50], [ROOM.x0 + 0.42, 10, 50]], // left wall + niche frame
+    [[ROOM.x1 - 0.02, -1, -50], [50, 10, 50]],
+    [[-50, -1, -50], [50, 10, z0 + 0.12]],
+    [[-50, -1, ROOM.z1 - 0.02], [50, 10, 50]],
+    [[-50, ROOM.h - 0.02, -50], [50, 20, 50]],
+    [[-1.2, -1, 0.6], [1.2, 0.32, 1.8]], // hero plinth
+    [[-4.2, -1, z0], [4.2, 0.4, z0 + 3.4]], // stage
+    [[-1.2, -1, z0 + 1.48], [1.2, 1.5, z0 + 2.32]], // DJ booth + gear
+    [[ROOM.x1 - 2.03, -1, -1.53], [ROOM.x1 - 1.17, 1.06, 0.93]], // cash desk
+  ].map(([min, max]) => ({ type: 'box', min, max }));
+}
 const tees = [];
 const hero = new Tee({ renderer, hangerMatrix: room.heroHanger, name: 'hero', quality });
 scene.add(hero.group);
@@ -69,7 +84,7 @@ const djTee = new Tee({
   name: 'dj',
   quality: 0.5,
   worn: {
-    depth: 0.15,
+    depth: 0.17,
     colliders: () => {
       dj.group.updateMatrixWorld(true);
       return dj.colliders();
@@ -100,15 +115,15 @@ const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight 
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
 const grade = new ShaderPass({
-  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uRes: { value: new THREE.Vector2() } },
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uVig: { value: 0.62 }, uRes: { value: new THREE.Vector2() } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
-    uniform sampler2D tDiffuse; uniform float uTime; varying vec2 vUv;
+    uniform sampler2D tDiffuse; uniform float uTime; uniform float uVig; varying vec2 vUv;
     float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)) + uTime) * 43758.5453); }
     void main(){
       vec3 c = texture2D(tDiffuse, vUv).rgb;
       vec2 d = vUv - 0.5;
-      c *= mix(1.0, 0.62, smoothstep(0.25, 0.95, dot(d, d) * 2.2));
+      c *= mix(1.0, uVig, smoothstep(0.2, 0.95, dot(d, d) * 2.2));
       c += (h(vUv * 1000.0) - 0.5) * 0.018;
       gl_FragColor = vec4(c, 1.0);
     }`,
@@ -148,7 +163,7 @@ let focused = null; // Tee
 let held = null; // Tee
 let holdYaw = 0;
 let holdYawTarget = 0;
-let holdDist = 0.95;
+let holdDist = 1.05;
 let grab = null; // {tee, plane}
 
 function pick(ev) {
@@ -217,7 +232,7 @@ controls.onLookDrag = (dx) => {
 };
 controls.onWheel = (dy) => {
   if (!held) return false;
-  holdDist = THREE.MathUtils.clamp(holdDist + dy * 0.0008, 0.65, 1.5);
+  holdDist = THREE.MathUtils.clamp(holdDist + dy * 0.0008, 0.6, 1.6);
   return true;
 };
 // hover test at most once per frame
@@ -269,7 +284,8 @@ function pickUp() {
   held = focused;
   holdYaw = 0;
   holdYawTarget = 0;
-  holdDist = 0.95;
+  holdDist = 1.05;
+  controls.flyTo(controls.pos, controls.yaw, -0.04);
   pickBtn.textContent = 'Put it back';
   turnBtn.hidden = false;
   panelHint.textContent = 'Drag the background to turn it in your hands. Scroll to bring it closer. Grab the fabric to pull it.';
@@ -338,23 +354,33 @@ const tmp = new THREE.Vector3();
 const fwd = new THREE.Vector3();
 const right = new THREE.Vector3();
 
-function updateHeld(dt) {
+// a soft studio key that follows you, so whatever you pick up is lit well
+const studio = new THREE.SpotLight(0xfff7f0, 0, 4, 0.6, 0.9, 1.5);
+scene.add(studio, studio.target);
+let studioK = 0;
+
+function updateHeld(dt, t) {
+  studioK += ((held ? 1 : 0) - studioK) * Math.min(1, dt * 3);
+  studio.intensity = 2.2 * studioK;
+  grade.uniforms.uVig.value = 0.62 - 0.22 * studioK;
   if (!held) return;
-  holdYaw += (holdYawTarget - holdYaw) * Math.min(1, dt * 5);
+  holdYaw += (holdYawTarget - holdYaw) * Math.min(1, dt * 4);
   camera.getWorldDirection(fwd);
   fwd.y = 0;
   fwd.normalize();
   right.crossVectors(fwd, new THREE.Vector3(0, 1, 0)).normalize();
   const centre = camera.position.clone().addScaledVector(fwd, holdDist);
   // keep the garment clear of the product panel on wide screens
-  if (!panel.hidden && innerWidth > 720) centre.addScaledVector(right, -0.2 * holdDist);
-  centre.y = camera.position.y + 0.3;
-  // hands rotate around the vertical axis through the garment
-  const halfSpan = 0.27;
-  const c = Math.cos(holdYaw);
-  const s = Math.sin(holdYaw);
-  const off = right.clone().multiplyScalar(c * halfSpan).addScaledVector(fwd, s * halfSpan);
+  if (!panel.hidden && innerWidth > 720) centre.addScaledVector(right, -0.22 * holdDist);
+  // hands just above eye level, with a little natural sway
+  centre.y = camera.position.y + 0.28 + Math.sin(t * 1.1) * 0.008;
+  centre.addScaledVector(right, Math.sin(t * 0.7) * 0.01);
+  const yaw = holdYaw + Math.sin(t * 0.45) * 0.05;
+  const halfSpan = 0.26;
+  const off = right.clone().multiplyScalar(Math.cos(yaw) * halfSpan).addScaledVector(fwd, Math.sin(yaw) * halfSpan);
   held.hold(centre.clone().sub(off), centre.clone().add(off));
+  studio.position.copy(camera.position).addScaledVector(right, 0.7).add(new THREE.Vector3(0, 0.9, 0)).addScaledVector(fwd, 0.1);
+  studio.target.position.copy(centre).add(new THREE.Vector3(0, -0.3, 0));
 }
 
 let cpuAvg = 0;
@@ -363,7 +389,7 @@ function tick() {
   const dt = Math.min(clock.getDelta(), 1 / 20);
   const info = audio.info();
   controls.update(dt);
-  updateHeld(dt);
+  updateHeld(dt, clock.elapsedTime);
 
   const t = info.t;
   // HVAC breeze keeps the display piece alive when you are near it

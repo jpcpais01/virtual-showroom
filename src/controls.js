@@ -16,6 +16,8 @@ export class WalkControls {
     this.pos = start.pos.clone();
     this.yaw = start.yaw;
     this.pitch = start.pitch;
+    this.yawT = this.yaw; // look targets: the view eases towards them
+    this.pitchT = this.pitch;
     this.vel = new THREE.Vector3();
     this.keys = new Set();
     this.walkTarget = null;
@@ -70,8 +72,8 @@ export class WalkControls {
       const dy = e.clientY - d.ly;
       if (!(this.onLookDrag && this.onLookDrag(dx, dy))) {
         const k = e.pointerType === 'touch' ? 0.0055 : 0.0038;
-        this.yaw -= dx * k;
-        this.pitch = THREE.MathUtils.clamp(this.pitch - dy * k, -1.2, 1.2);
+        this.yawT -= dx * k;
+        this.pitchT = THREE.MathUtils.clamp(this.pitchT - dy * k, -1.2, 1.2);
         this.fly = null;
       }
     }
@@ -160,6 +162,8 @@ export class WalkControls {
       this.pos.lerpVectors(f.from, f.to, e);
       this.yaw = f.yaw0 + (f.yaw1 - f.yaw0) * e;
       this.pitch = f.p0 + (f.p1 - f.p0) * e;
+      this.yawT = this.yaw;
+      this.pitchT = this.pitch;
       if (f.t >= 1) this.fly = null;
     } else if (this.enabled && !this.lockMove) {
       const input = new THREE.Vector3();
@@ -170,8 +174,8 @@ export class WalkControls {
       if (k.has('KeyS') || k.has('ArrowDown')) input.sub(fwd);
       if (k.has('KeyD')) input.add(right);
       if (k.has('KeyA')) input.sub(right);
-      if (k.has('ArrowLeft')) this.yaw += dt * 1.8;
-      if (k.has('ArrowRight')) this.yaw -= dt * 1.8;
+      if (k.has('ArrowLeft')) this.yawT += dt * 1.8;
+      if (k.has('ArrowRight')) this.yawT -= dt * 1.8;
       const speed = k.has('ShiftLeft') || k.has('ShiftRight') ? 3.6 : 2.1;
       if (input.lengthSq() > 0) {
         input.normalize().multiplyScalar(speed);
@@ -192,7 +196,15 @@ export class WalkControls {
       if (this.walkTarget && moved < this.vel.length() * dt * 0.2) this.walkTarget = null; // blocked
       this.bob += moved * 5.5;
     }
+    this._ease(dt);
     this._apply();
+  }
+
+  _ease(dt) {
+    if (this.fly) return;
+    const k = 1 - Math.exp(-dt * 16);
+    this.yaw += (this.yawT - this.yaw) * k;
+    this.pitch += (this.pitchT - this.pitch) * k;
   }
 
   _apply() {
