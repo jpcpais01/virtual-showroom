@@ -70,8 +70,8 @@ export class WalkControls {
       const dy = e.clientY - d.ly;
       if (!(this.onLookDrag && this.onLookDrag(dx, dy))) {
         const k = e.pointerType === 'touch' ? 0.0055 : 0.0038;
-        this.yaw += dx * k;
-        this.pitch = THREE.MathUtils.clamp(this.pitch + dy * k, -1.2, 1.2);
+        this.yaw -= dx * k;
+        this.pitch = THREE.MathUtils.clamp(this.pitch - dy * k, -1.2, 1.2);
         this.fly = null;
       }
     }
