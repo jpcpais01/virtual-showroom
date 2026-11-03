@@ -23,6 +23,7 @@ self.onmessage = (e) => {
     c.vel.set(m.state.vel);
     c.invMass.set(m.state.invMass);
     Object.assign(c, m.params);
+    c.baseSubsteps = c.substeps;
     c.colliders = m.state.colliders || [];
     c.acc = 0;
     // settle into the initial drape here instead of blocking the page load
@@ -51,27 +52,32 @@ self.onmessage = (e) => {
       c.wind = job.wind;
       c.colliderFriction = job.colliderFriction || 0;
       c.damping = job.damping;
-      // kinematic particles (pins, hands, mouse) come from the main thread
-      const k = job.kin;
-      for (let i = 0; i < k.length; i += 4) {
-        const j = 3 * k[i];
-        c.pos[j] = k[i + 1];
-        c.pos[j + 1] = k[i + 2];
-        c.pos[j + 2] = k[i + 3];
-      }
-      // Keep the cloth in real time. Normally that is one 60 Hz step per
-      // request; if the machine falls behind we take up to three steps or
-      // longer ones, rather than letting the fabric drift into slow motion.
-      c.acc = Math.min(c.acc + job.dt, 0.1);
+      // kinematic particles (pins, hands, mouse) come from the main thread;
+      // the solver glides them to these targets during the step
+      c.kinTargets = job.kin;
+      // Fixed 60 Hz steps (a varying step size makes XPBD cloth jitter).
+      // Normally one step per request; two when catching up; anything
+      // beyond that is dropped rather than snowballing.
+      c.acc = Math.min(c.acc + job.dt, 2 * STEP);
       let steps = 0;
       let simT = 0;
-      if (c.acc >= STEP * 0.5) {
-        steps = Math.min(3, Math.max(1, Math.round(c.acc / STEP)));
-        const h = Math.min(c.acc / steps, 1 / 30);
-        for (let s = 0; s < steps; s++) c.step(h);
-        simT = h * steps;
-        c.acc = Math.max(0, c.acc - h * steps);
-        if (c.acc > 0.05) c.acc = 0;
+      while (c.acc >= STEP * 0.999 && steps < 2) {
+        const ts = performance.now();
+        c.step(STEP);
+        // adapt the substep count to this machine so a step always fits
+        // comfortably inside a frame (fewer substeps = slightly stretchier)
+        const ms = performance.now() - ts;
+        c.stepMs = c.stepMs ? c.stepMs * 0.8 + ms * 0.2 : ms;
+        if (c.stepMs > 9 && c.substeps > 6) {
+          c.substeps--;
+          c.stepMs = 0;
+        } else if (c.stepMs < 5 && c.substeps < c.baseSubsteps) {
+          c.substeps++;
+          c.stepMs = 0;
+        }
+        c.acc -= STEP;
+        steps++;
+        simT += STEP;
       }
       if (!steps) continue;
       const res = result(job.id, c, steps, simT);

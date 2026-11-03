@@ -60,9 +60,10 @@ class SpatialHash {
           for (let i = start; i < end; i++) this.queryIds[this.querySize++] = this.cellEntries[i];
         }
   }
-  queryAll(pos, n, maxDist) {
+  queryAll(pos, n, maxDist, rest = null, restMin = 0) {
     let num = 0;
     const maxDist2 = maxDist * maxDist;
+    const rMin2 = restMin * restMin;
     for (let i = 0; i < n; i++) {
       this.firstAdjId[i] = num;
       this.query(pos, i, maxDist);
@@ -73,6 +74,14 @@ class SpatialHash {
         const dy = pos[3 * id1 + 1] - pos[3 * i + 1];
         const dz = pos[3 * id1 + 2] - pos[3 * i + 2];
         if (dx * dx + dy * dy + dz * dz > maxDist2) continue;
+        if (rest) {
+          // particles that are close in the rest state (same patch of fabric)
+          // are held apart by the stretch/bend constraints already
+          const rx = rest[3 * id1] - rest[3 * i];
+          const ry = rest[3 * id1 + 1] - rest[3 * i + 1];
+          const rz = rest[3 * id1 + 2] - rest[3 * i + 2];
+          if (rx * rx + ry * ry + rz * rz < rMin2) continue;
+        }
         if (num >= this.adjIds.length) {
           const grown = new Int32Array(2 * num);
           grown.set(this.adjIds);
@@ -117,13 +126,14 @@ export class Cloth {
     this.dragCoeff = 1.2; // aerodynamic drag coefficient of the cloth faces
     this.gravity = -9.81;
     this.substeps = 10;
+    this.selfRestMin = 0.05; // skip self-collision pairs closer than this at rest
     this.floorY = 0.002;
     this.selfCollision = true;
     this.wind = [0, 0, 0]; // air velocity (m/s), acts through face drag
     this.colliderFriction = 0;
     this.colliders = []; // {type:'sphere', c:[x,y,z], r} | {type:'capsule', a, b, r}
 
-    this.hash = new SpatialHash(0.03, this.n);
+    this.hash = new SpatialHash(0.06, this.n);
     this.normals = new Float32Array(this.n * 3);
   }
 
@@ -146,11 +156,23 @@ export class Cloth {
     const vel = this.vel;
     const w = this.invMass;
 
-    if (this.selfCollision) {
-      // how far a particle can travel during this frame (bounded)
-      const maxTravel = Math.min(0.3 * this.thickness * this.substeps, this._maxSpeed() * dt + 0.2 * this.thickness);
-      this.hash.create(pos, n);
-      this.hash.queryAll(pos, n, maxTravel + this.thickness);
+    // Self collision neighbours are rebuilt every few substeps. The velocity
+    // clamp below bounds how far anything can move in between, so the search
+    // radius stays small however fast the cloth is being thrown around.
+    const rebuildEvery = this.rebuildEvery || 5;
+    const searchR = this.thickness * (1 + 0.3 * rebuildEvery) + 0.002;
+    // kinematic particles (hands, mouse) glide to their new targets across
+    // the substeps instead of jumping there at the start of the step
+    const kt = this.kinTargets;
+    let kFrom = null;
+    if (kt && kt.length) {
+      kFrom = new Float32Array(kt.length);
+      for (let a = 0; a < kt.length; a += 4) {
+        const j = 3 * kt[a];
+        kFrom[a + 1] = pos[j];
+        kFrom[a + 2] = pos[j + 1];
+        kFrom[a + 3] = pos[j + 2];
+      }
     }
 
     const damp = Math.max(0, 1 - this.damping * sdt);
@@ -159,22 +181,53 @@ export class Cloth {
     const maxV = (0.3 * this.thickness) / sdt;
     const maxV2 = maxV * maxV;
     for (let s = 0; s < this.substeps; s++) {
+      if (kFrom) {
+        const f = (s + 1) / this.substeps;
+        for (let a = 0; a < kt.length; a += 4) {
+          const j = 3 * kt[a];
+          pos[j] = kFrom[a + 1] + (kt[a + 1] - kFrom[a + 1]) * f;
+          pos[j + 1] = kFrom[a + 2] + (kt[a + 2] - kFrom[a + 2]) * f;
+          pos[j + 2] = kFrom[a + 3] + (kt[a + 3] - kFrom[a + 3]) * f;
+        }
+      }
+      if (this.selfCollision && s % rebuildEvery === 0) {
+        this.hash.create(pos, n);
+        this.hash.queryAll(pos, n, searchR, this.restPos, this.selfRestMin);
+      }
       this._aero(sdt);
+      // The clamp only limits motion *relative to the garment as a whole*:
+      // layers can't tunnel through each other, but the shirt as a whole can
+      // move as fast as you swing it (a plain clamp made it feel like syrup).
+      let mx = 0, my = 0, mz = 0, cnt = 0;
+      for (let i = 0; i < n; i++) {
+        if (w[i] === 0) continue;
+        const k = 3 * i;
+        vel[k] *= damp;
+        vel[k + 1] = (vel[k + 1] + this.gravity * sdt) * damp;
+        vel[k + 2] *= damp;
+        mx += vel[k];
+        my += vel[k + 1];
+        mz += vel[k + 2];
+        cnt++;
+      }
+      if (cnt) {
+        mx /= cnt;
+        my /= cnt;
+        mz /= cnt;
+      }
       for (let i = 0; i < n; i++) {
         const k = 3 * i;
         prev[k] = pos[k];
         prev[k + 1] = pos[k + 1];
         prev[k + 2] = pos[k + 2];
         if (w[i] === 0) continue;
-        vel[k] *= damp;
-        vel[k + 1] = (vel[k + 1] + this.gravity * sdt) * damp;
-        vel[k + 2] *= damp;
-        const v2 = vel[k] * vel[k] + vel[k + 1] * vel[k + 1] + vel[k + 2] * vel[k + 2];
+        const rx = vel[k] - mx, ry = vel[k + 1] - my, rz = vel[k + 2] - mz;
+        const v2 = rx * rx + ry * ry + rz * rz;
         if (v2 > maxV2) {
           const sc = maxV / Math.sqrt(v2);
-          vel[k] *= sc;
-          vel[k + 1] *= sc;
-          vel[k + 2] *= sc;
+          vel[k] = mx + rx * sc;
+          vel[k + 1] = my + ry * sc;
+          vel[k + 2] = mz + rz * sc;
         }
         pos[k] += vel[k] * sdt;
         pos[k + 1] += vel[k + 1] * sdt;
