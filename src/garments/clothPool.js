@@ -1,66 +1,92 @@
-// Main-thread side of the cloth worker. Each frame, the awake garments send
-// their kinematic particles + colliders; the latest solved positions come back
-// asynchronously and are copied in when ready. Falls back to stepping on the
-// main thread when module workers are unavailable.
+// Main-thread side of the cloth workers. Garments are spread over a few
+// workers so they simulate in parallel on separate cores. Each frame the awake
+// garments send their kinematic particles + colliders; the latest solved
+// positions come back asynchronously and are copied in when ready. Falls back
+// to stepping on the main thread when module workers are unavailable.
 
-let worker = null;
+export const stat = { ms: 0, steps: {} };
+
+let workers = null; // [{ w, pending }] or false
 let nextId = 1;
-let pending = false;
-const members = new Map(); // id -> { cloth, onResult, job, dtAcc }
+const members = new Map(); // id -> { cloth, onResult, job, dtAcc, slot }
 
-function ensureWorker() {
-  if (worker !== null) return worker;
+function ensureWorkers() {
+  if (workers !== null) return workers;
   try {
-    worker = new Worker(new URL('./cloth.worker.js', import.meta.url), { type: 'module' });
-    worker.onmessage = (e) => {
-      pending = false;
-      for (const r of e.data.results) {
-        const m = members.get(r.id);
-        if (m) m.onResult(r);
-      }
-    };
-    worker.onerror = () => {
-      worker = false;
-    };
+    const cores = navigator.hardwareConcurrency || 4;
+    const count = Math.max(1, Math.min(4, cores - 2));
+    workers = [];
+    for (let i = 0; i < count; i++) {
+      const slot = { w: new Worker(new URL('./cloth.worker.js', import.meta.url), { type: 'module' }), pending: false };
+      slot.w.onmessage = (e) => {
+        slot.pending = false;
+        if (e.data.ms) stat.ms = stat.ms * 0.9 + e.data.ms * 0.1;
+        for (const r of e.data.results) {
+          stat.steps[r.id] = (stat.steps[r.id] || 0) + (r.simT || 0);
+          const m = members.get(r.id);
+          if (m) m.onResult(r);
+        }
+      };
+      slot.w.onerror = (err) => console.warn('cloth worker error', err.message);
+      workers.push(slot);
+    }
   } catch {
-    worker = false;
+    workers = false;
   }
-  return worker;
+  return workers;
 }
 
 export const clothPool = {
   get threaded() {
-    return !!ensureWorker();
+    return !!ensureWorkers();
   },
-  add(cloth, onResult) {
+  /**
+   * Register a cloth. `warm` = { steps, colliders?: [per step] } settles the
+   * initial drape inside the worker; onResult fires once that is done.
+   */
+  add(cloth, onResult, warm = null) {
     const id = nextId++;
-    members.set(id, { cloth, onResult, job: null, dtAcc: 0 });
-    const w = ensureWorker();
-    if (w) {
-      w.postMessage({
-        type: 'add',
-        id,
-        init: {
-          pos: cloth.pos,
-          restPos: cloth.restPos,
-          mass: cloth.mass,
-          tris: cloth.tris,
-          stretch: cloth.stretch,
-          bend: cloth.bend,
-        },
-        state: { pos: cloth.pos, vel: cloth.vel },
-        params: {
-          substeps: cloth.substeps,
-          stretchCompliance: cloth.stretchCompliance,
-          bendCompliance: cloth.bendCompliance,
-          thickness: cloth.thickness,
-          friction: cloth.friction,
-          damping: cloth.damping,
-          dragCoeff: cloth.dragCoeff,
-          selfCollision: cloth.selfCollision,
-        },
-      });
+    const ws = ensureWorkers();
+    const slot = ws ? ws[(id - 1) % ws.length] : null;
+    members.set(id, { cloth, onResult, job: null, dtAcc: 0, slot });
+    if (!slot) {
+      // main-thread fallback: settle now
+      if (warm) {
+        for (let i = 0; i < warm.steps; i++) {
+          if (warm.colliders) cloth.colliders = warm.colliders[i];
+          cloth.step(1 / 60);
+        }
+        cloth.vel.fill(0);
+      }
+      cloth.computeNormals();
+      queueMicrotask(() => onResult({ pos: null, nrm: null, ke: 1, steps: 0 }));
+      return id;
     }
+    slot.w.postMessage({
+      type: 'add',
+      id,
+      init: {
+        pos: cloth.pos,
+        restPos: cloth.restPos,
+        mass: cloth.mass,
+        tris: cloth.tris,
+        stretch: cloth.stretch,
+        bend: cloth.bend,
+      },
+      state: { pos: cloth.pos, vel: cloth.vel, invMass: cloth.invMass, colliders: cloth.colliders },
+      params: {
+        substeps: cloth.substeps,
+        stretchCompliance: cloth.stretchCompliance,
+        bendCompliance: cloth.bendCompliance,
+        thickness: cloth.thickness,
+        friction: cloth.friction,
+        damping: cloth.damping,
+        dragCoeff: cloth.dragCoeff,
+        selfCollision: cloth.selfCollision,
+        colliderFriction: cloth.colliderFriction || 0,
+      },
+      warm,
+    });
     return id;
   },
   /** queue this frame's input for one garment */
@@ -77,15 +103,15 @@ export const clothPool = {
       colliders: c.colliders,
       wind: c.wind,
       colliderFriction: c.colliderFriction,
+      damping: c.damping,
     };
   },
   /** send all queued jobs (once per frame) */
   flush() {
-    const w = ensureWorker();
-    const jobs = [];
+    const batches = new Map();
     for (const [, m] of members) {
       if (!m.job) continue;
-      if (!w) {
+      if (!m.slot) {
         // main-thread fallback
         const c = m.cloth;
         c.step(Math.min(m.dtAcc, 1 / 30));
@@ -95,16 +121,17 @@ export const clothPool = {
         m.dtAcc = 0;
         continue;
       }
-      if (pending) continue; // keep accumulating time until the worker is free
-      m.job.dt = Math.min(m.dtAcc, 1 / 30);
+      if (m.slot.pending) continue; // keep accumulating time until that worker is free
+      m.job.dt = m.dtAcc;
       m.job.invMass = new Float32Array(m.job.invMass);
-      jobs.push(m.job);
+      if (!batches.has(m.slot)) batches.set(m.slot, []);
+      batches.get(m.slot).push(m.job);
       m.job = null;
       m.dtAcc = 0;
     }
-    if (w && jobs.length) {
-      pending = true;
-      w.postMessage({ type: 'step', jobs });
+    for (const [slot, jobs] of batches) {
+      slot.pending = true;
+      slot.w.postMessage({ type: 'step', jobs });
     }
   },
 };

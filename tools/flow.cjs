@@ -8,8 +8,9 @@ const { chromium } = require('playwright');
   page.on('pageerror', (e) => console.log('[pageerror]', e.message));
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log('[console]', m.text()); });
   const steps = (process.argv[3] || 'booth,rail,hold,back').split(',');
-  await page.goto('http://127.0.0.1:5173/?auto', { timeout: 120000 });
-  await page.waitForTimeout(6000);
+  await page.goto('http://127.0.0.1:5173/?auto&nolock', { timeout: 120000 });
+  await page.waitForFunction(() => window.__khora && !document.getElementById('enterActions').hidden, null, { timeout: 150000 });
+  await page.waitForTimeout(1500);
   const shot = async (name) => { await page.screenshot({ path: `${out}/f_${name}.png`, timeout: 200000 }); console.log('shot', name); };
   for (const s of steps) {
     if (s === 'booth' || s === 'rail' || s === 'entrance') {

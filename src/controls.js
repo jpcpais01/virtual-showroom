@@ -4,6 +4,8 @@ import * as THREE from 'three';
  * First-person walk/look controls for desktop and touch.
  *  - drag: look around (or whatever a hook claims, e.g. pulling cloth)
  *  - tap the floor: walk there; WASD / arrows: walk; wheel: step forward/back
+ *  - desktop "mouse look" mode: the cursor is hidden (pointer lock) and moving
+ *    the mouse turns the view; clicks act on whatever the reticle is on.
  */
 export class WalkControls {
   constructor(camera, dom, { bounds, colliders = [], start }) {
@@ -34,6 +36,31 @@ export class WalkControls {
 
     this._down = null;
     this._mode = null;
+    this.onLockChange = null;
+    this.mouseLook = false; // set by the app on desktop
+    this._lockedAt = 0;
+    document.addEventListener('pointerlockchange', () => {
+      if (!this.locked) this.dom.classList.remove('is-locked');
+      else {
+        this.dom.classList.add('is-locked');
+        this._lockedAt = performance.now();
+      }
+      this.onLockChange && this.onLockChange(this.locked);
+    });
+    document.addEventListener('pointerlockerror', () => this.onLockChange && this.onLockChange(false));
+    addEventListener('mousemove', (e) => {
+      if (!this.locked || !this.enabled) return;
+      // browsers sometimes report one huge jump right after locking: skip it
+      if (performance.now() - this._lockedAt < 120) return;
+      if (Math.abs(e.movementX) > 300 || Math.abs(e.movementY) > 300) return;
+      // raw mouse deltas while the cursor is hidden; turn directly, no lag
+      const k = 0.0022;
+      this.yawT -= e.movementX * k;
+      this.pitchT = THREE.MathUtils.clamp(this.pitchT - e.movementY * k, -1.2, 1.2);
+      this.yaw = this.yawT;
+      this.pitch = this.pitchT;
+      this.fly = null;
+    });
     dom.addEventListener('pointerdown', (e) => this._pd(e));
     addEventListener('pointermove', (e) => this._pm(e));
     addEventListener('pointerup', (e) => this._pu(e));
@@ -52,8 +79,40 @@ export class WalkControls {
     this._apply();
   }
 
+  get locked() {
+    return document.pointerLockElement === this.dom;
+  }
+  /** hide the cursor and turn with the mouse (needs a user gesture) */
+  lock() {
+    if (!this.mouseLook || this.locked || !this.dom.requestPointerLock) return;
+    try {
+      const p = this.dom.requestPointerLock({ unadjustedMovement: true });
+      if (p && p.catch) p.catch(() => this.dom.requestPointerLock()?.catch?.(() => {}));
+    } catch {
+      try {
+        this.dom.requestPointerLock();
+      } catch {}
+    }
+  }
+  unlock() {
+    if (this.locked) document.exitPointerLock();
+  }
+  /** a synthetic pointer event at the centre of the view (the reticle) */
+  centreEvent() {
+    const r = this.dom.getBoundingClientRect();
+    return { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, pointerType: 'mouse' };
+  }
+
   _pd(e) {
     if (!this.enabled) return;
+    if (this.locked) {
+      // click while looking around: act on whatever is under the reticle
+      if (e.button !== 0) return;
+      const c = this.centreEvent();
+      if (!(this.onTap && this.onTap(c))) this._walkToPointer(c);
+      return;
+    }
+    if (this.mouseLook && this.onUnlockedClick && this.onUnlockedClick(e)) return;
     this.dom.setPointerCapture?.(e.pointerId);
     this._down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, ev: e, t: performance.now(), id: e.pointerId };
     this._mode = null;
