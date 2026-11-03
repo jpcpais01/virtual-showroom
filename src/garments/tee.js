@@ -158,6 +158,7 @@ export class Tee {
     this._buildRims();
     this._buildLabel();
     this.worn = !!worn;
+    let warm = null;
     this.pinTargets = new Map(); // id -> {target, from, t}
     this.hangerLocal = new Map();
     if (worn) {
@@ -165,11 +166,15 @@ export class Tee {
       this.cloth.colliderFriction = 0.6;
       this.alwaysAwake = true;
       this.state = 'worn';
+      // the body poses while the shirt settles; the worker replays the
+      // collider frames so the page never blocks on it
+      const frames = [];
       for (let i = 0; i < 160; i++) {
         if (worn.beforeStep) worn.beforeStep(i);
-        this.cloth.colliders = worn.colliders();
-        this.cloth.step(1 / 60);
+        frames.push(worn.colliders());
       }
+      this.cloth.colliders = frames[0];
+      warm = { steps: 160, colliders: frames };
     } else {
       this._buildHanger();
       for (const id of pat.hangerIds) {
@@ -177,13 +182,17 @@ export class Tee {
         this.hangerLocal.set(id, new THREE.Vector3(v.x, v.y + 0.006, 0));
       }
       this._pinToHanger(true);
-      // settle into a natural drape before the first frame
-      for (let i = 0; i < 90; i++) this.cloth.step(1 / 60);
+      this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
+      // settle into a natural drape (in the worker) before it is shown
+      warm = { steps: 90 };
     }
     this.ke = 1;
     this.dirty = true;
-    this.poolId = clothPool.add(this.cloth, (r) => this._onResult(r));
-    this.update(0);
+    // hidden until the first solved drape arrives
+    this.ready = new Promise((res) => (this._readyRes = res));
+    this.isReady = false;
+    this.group.visible = false;
+    this.poolId = clothPool.add(this.cloth, (r) => this._onResult(r), warm);
   }
 
   _onResult(r) {
@@ -202,6 +211,16 @@ export class Tee {
     }
     this.ke = r.ke;
     this.dirty = true;
+    if (!this.isReady) {
+      this.isReady = true;
+      this.group.visible = true;
+      if (!r.pos) c.computeNormals();
+      this._writeRenderMesh();
+      this._writeRims();
+      this._writeLabel();
+      this.dirty = false;
+      this._readyRes();
+    }
   }
 
   // ------------------------------------------------------------ render mesh
@@ -482,8 +501,10 @@ export class Tee {
     const { id } = this.grabbed;
     const c = this.cloth;
     const cur = new THREE.Vector3(c.pos[3 * id], c.pos[3 * id + 1], c.pos[3 * id + 2]);
-    const d = point.clone().sub(cur).multiplyScalar(0.5);
-    if (d.length() > 0.035) d.setLength(0.035);
+    // follow the mouse closely; the cap only stops teleports that would
+    // tear through the solver
+    const d = point.clone().sub(cur).multiplyScalar(0.7);
+    if (d.length() > 0.06) d.setLength(0.06);
     cur.add(d);
     c.pos[3 * id] = cur.x;
     c.pos[3 * id + 1] = cur.y;
@@ -516,7 +537,7 @@ export class Tee {
   }
 
   // ------------------------------------------------------------ per frame
-  update(dt, { wind } = {}) {
+  update(dt, { wind, paused = false } = {}) {
     const c = this.cloth;
     // animate pins sliding back onto the hanger
     if (this.pinTargets.size) {
@@ -532,13 +553,17 @@ export class Tee {
       if (!this.pinTargets.size && this.state === 'returning') this.state = 'hanging';
     }
     if (wind) c.wind = wind;
-    if (dt > 0 && !this.asleep) {
+    if (dt > 0 && !this.asleep && !paused && this.isReady) {
       clothPool.request(this.poolId, dt);
       // sleep when settled on the hanger to save CPU
+      // a garment left alone on its hanger comes to rest (real fabric has
+      // internal friction), then sleeps
+      this.idleT = this.state === 'hanging' && !this.grabbed ? (this.idleT || 0) + dt : 0;
+      c.damping = this.idleT > 1.2 && !this.alwaysAwake ? 3.5 : 0.6;
       if (this.state === 'hanging' && !this.grabbed && !this.alwaysAwake) {
-        if (this.ke < 2e-6) this.sleepTimer += dt;
+        if (this.ke < 2e-4) this.sleepTimer += dt;
         else this.sleepTimer = 0;
-        if (this.sleepTimer > 1.5) this.asleep = true;
+        if (this.sleepTimer > 1.0) this.asleep = true;
       }
     }
     if (dt === 0) {

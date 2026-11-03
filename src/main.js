@@ -8,7 +8,7 @@ import { buildRoom, ROOM } from './scene/room.js';
 import { buildStage } from './scene/stage.js';
 import { FloorReflection } from './scene/reflection.js';
 import { Tee } from './garments/tee.js';
-import { clothPool } from './garments/clothPool.js';
+import { clothPool, stat as clothStat } from './garments/clothPool.js';
 import { RaveAudio } from './audio.js';
 import { WalkControls } from './controls.js';
 
@@ -156,6 +156,21 @@ const spots = {
 };
 const colliders = [...room.colliders, ...stage.colliders];
 const controls = new WalkControls(camera, canvas, { bounds: ROOM, colliders, start: spots[params.get('spot')] || spots.entrance });
+// desktop: hidden cursor, the mouse turns the view (pointer lock). The cursor
+// comes back whenever a product panel is open or Esc is pressed.
+controls.mouseLook = !isMobile && matchMedia('(pointer: fine)').matches && !params.has('nolock');
+controls.onUnlockedClick = () => {
+  if (focused) return false;
+  controls.lock();
+  return true;
+};
+const reticle = document.getElementById('reticle');
+if (!controls.mouseLook) document.querySelector('.intro__hint').textContent = isMobile ? 'Drag to look around · tap the floor to walk · tap a piece to inspect it' : 'Drag to look around · WASD or click the floor to walk · Click a piece to inspect it';
+controls.onLockChange = (locked) => {
+  reticle.hidden = !locked;
+  if (locked) hint('Move the mouse to look · WASD to walk · click a shirt · Esc for the cursor', 5000);
+  else if (!focused && controls.enabled && controls.mouseLook) hint('Click anywhere to look around');
+};
 
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
@@ -238,7 +253,7 @@ controls.onWheel = (dy) => {
 // hover test at most once per frame
 let hoverEv = null;
 canvas.addEventListener('pointermove', (ev) => {
-  if (grab || ev.buttons || ev.pointerType === 'touch') return;
+  if (grab || ev.buttons || ev.pointerType === 'touch' || controls.locked) return;
   if (!hoverEv) requestAnimationFrame(() => {
     canvas.classList.toggle('is-hover', !!pick(hoverEv));
     hoverEv = null;
@@ -267,6 +282,8 @@ function hint(text, ms = 0) {
 
 function focus(tee) {
   focused = tee;
+  controls.unlock();
+  hint(null);
   const s = teeFocusSpot(tee);
   controls.flyTo(s.pos, s.yaw, s.pitch);
   panel.hidden = false;
@@ -278,6 +295,8 @@ function unfocus() {
   if (held) putBack();
   focused = null;
   panel.hidden = true;
+  controls.lock();
+  if (!controls.locked && controls.mouseLook) hint('Click anywhere to look around');
 }
 function pickUp() {
   if (!focused) return;
@@ -304,7 +323,7 @@ pickBtn.onclick = () => (held ? putBack() : pickUp());
 turnBtn.onclick = () => (holdYawTarget += Math.PI);
 $('panelClose').onclick = unfocus;
 addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') unfocus();
+  if (e.key === 'Escape' && focused) unfocus();
   if (e.key === 'e' || e.key === 'E') {
     if (focused) held ? putBack() : pickUp();
   }
@@ -334,16 +353,36 @@ function enter(withSound) {
   $('intro').classList.add('is-gone');
   $('hud').hidden = false;
   if (withSound) setSound(true);
-  hint(isMobile ? 'Drag to look · tap the floor to walk · tap a shirt' : 'Drag to look · WASD / click the floor to walk · click a shirt', 6000);
   controls.enabled = true;
+  if (controls.mouseLook) controls.lock();
+  else hint(isMobile ? 'Drag to look · tap the floor to walk · tap a shirt' : 'Drag to look · WASD / click the floor to walk · click a shirt', 6000);
 }
 $('enterSound').onclick = () => enter(true);
 $('enterSilent').onclick = () => enter(false);
-texturesReady.then(() => {
+// Everything heavy happens behind the intro: textures upload, the garments
+// settle in their workers, shaders compile in parallel, and a few frames are
+// drawn so nothing stalls once you walk in.
+const sceneReady = (async () => {
+  await texturesReady;
+  progressEl.style.width = '70%';
+  await Promise.all([...tees, djTee].map((t) => t.ready));
+  progressEl.style.width = '85%';
+  scene.traverse((o) => {
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    for (const m of mats) for (const v of Object.values(m)) if (v && v.isTexture) renderer.initTexture(v);
+  });
+  try {
+    await renderer.compileAsync(scene, camera);
+  } catch {}
+  progressEl.style.width = '95%';
+  warmFrames = 0;
+  await new Promise((res) => (onWarm = res));
   progressEl.style.width = '100%';
   $('enterActions').hidden = false;
-});
-if (params.has('auto')) setTimeout(() => enter(false), 50);
+})();
+let warmFrames = -1;
+let onWarm = null;
+if (params.has('auto')) sceneReady.then(() => enter(false));
 
 // ---------------------------------------------------------------- loop
 const clock = new THREE.Clock();
@@ -383,9 +422,37 @@ function updateHeld(dt, t) {
   studio.target.position.copy(centre).add(new THREE.Vector3(0, -0.3, 0));
 }
 
+const frustum = new THREE.Frustum();
+const projScreen = new THREE.Matrix4();
+const djSphere = new THREE.Sphere(new THREE.Vector3(), 0.9);
+const _sph = new THREE.Sphere();
+function teeSphere(tee) {
+  _sph.center.setFromMatrixPosition(tee.hangerMatrix);
+  _sph.center.y -= 0.4;
+  _sph.radius = 0.8;
+  return _sph;
+}
+// reticle: highlight when it is over a shirt (pointer-lock mode)
+let reticleTimer = 0;
+function updateReticle(dt) {
+  if (!controls.locked) return;
+  if ((reticleTimer += dt) < 0.05) return;
+  reticleTimer = 0;
+  const hit = pick(controls.centreEvent());
+  reticle.classList.toggle('is-hot', !!hit);
+}
+
 let cpuAvg = 0;
+let frames = 0;
 function tick() {
+  if (warmFrames < 0) {
+    // still loading behind the intro: draw nothing yet
+    clock.getDelta();
+    requestAnimationFrame(tick);
+    return;
+  }
   const tStart = performance.now();
+  frames++;
   const dt = Math.min(clock.getDelta(), 1 / 20);
   const info = audio.info();
   controls.update(dt);
@@ -394,19 +461,27 @@ function tick() {
   const t = info.t;
   // HVAC breeze keeps the display piece alive when you are near it
   const camPos = camera.position;
+  camera.updateMatrixWorld();
+  projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(projScreen);
   for (const tee of tees) {
     const near = camPos.distanceTo(tmp.setFromMatrixPosition(tee.hangerMatrix)) < 6.5;
     tee.alwaysAwake = tee === hero && near;
     if (tee.alwaysAwake) tee.wake();
     const wind = [Math.sin(t * 0.31) * 0.12, 0, 0.1 + Math.sin(t * 0.53 + 1) * 0.12];
-    tee.update(dt, { wind: tee === hero ? wind : [0, 0, 0] });
+    // garments you cannot see wait (frozen) instead of using CPU; while you
+    // hold one, everything else waits so it gets the whole budget
+    const busy = tee === held || (grab && grab.tee === tee);
+    const paused = !busy && (!!held || !frustum.intersectsSphere(teeSphere(tee)));
+    tee.update(dt, { wind: tee === hero ? wind : [0, 0, 0], paused });
   }
   stage.update(dt, info);
   // DJ shirt follows the body; skip the solve when far away
   const djDist = camPos.distanceTo(stage.boothWorld);
   dj.group.updateMatrixWorld(true);
   djTee.cloth.colliders = dj.colliders();
-  if (djDist < 14) djTee.update(dt, { wind: [0, 0, 0] });
+  djSphere.center.copy(stage.boothWorld).setY(1.3);
+  djTee.update(dt, { wind: [0, 0, 0], paused: djDist > 14 || !!held || !frustum.intersectsSphere(djSphere) });
   clothPool.flush();
   room.update(info);
   if ((listenerTimer += dt) > 0.15) {
@@ -415,9 +490,16 @@ function tick() {
   }
 
   cpuAvg = cpuAvg * 0.95 + (performance.now() - tStart) * 0.05;
+  if (params.has('bench') && warmFrames > 4) {
+    // debug: measure simulation throughput without the GPU in the way
+    requestAnimationFrame(tick);
+    return;
+  }
   reflection.update(renderer, scene, camera);
   grade.uniforms.uTime.value = t % 100;
   composer.render(dt);
+  updateReticle(dt);
+  if (warmFrames >= 0 && ++warmFrames === 4 && onWarm) onWarm();
 
   // simple quality governor
   frameAvg = frameAvg * 0.95 + dt * 1000 * 0.05;
@@ -436,4 +518,4 @@ function tick() {
 requestAnimationFrame(tick);
 
 // debugging hooks
-window.__khora = { stats: () => ({ updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded }), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };
+window.__khora = { stats: () => ({ updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded, workerMs: +clothStat.ms.toFixed(2), steps: { ...clothStat.steps }, frames }), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };
