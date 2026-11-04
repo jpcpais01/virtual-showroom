@@ -243,4 +243,4 @@ function orderedLoop(neckFront, neckBack, verts, seamIds) {
   return [NL, ...front, N, ...back];
 }
 
-export { FRONT, BACK };
+export { FRONT, BACK, resample, bezier, pointInPoly, distToPolyline };

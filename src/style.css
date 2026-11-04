@@ -87,6 +87,7 @@ button { font: inherit; color: inherit; }
 .panel__colour { margin: 8px 0 14px; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
 .swatch { width: 14px; height: 14px; border-radius: 50%; display: inline-block; border: 1px solid rgba(255, 255, 255, 0.4); }
 .swatch--white { background: linear-gradient(135deg, #f4f3ef 55%, #004ecd 55%); }
+.swatch--black { background: linear-gradient(135deg, #111 55%, #004ecd 55%); }
 .panel__list { margin: 0 0 18px; padding: 0; list-style: none; font-size: 13px; line-height: 1.5; color: rgba(236, 240, 255, 0.86); }
 .panel__list li { padding: 6px 0; border-top: 1px solid var(--line); }
 .panel__actions { display: flex; gap: 8px; flex-wrap: wrap; }

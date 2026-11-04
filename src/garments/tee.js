@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { Cloth } from './cloth.js';
 import { clothPool } from './clothPool.js';
 import { buildTeePattern, FRONT, BACK } from './teeMesh.js';
+import { buildSocksPattern } from './socksMesh.js';
 
 const BASE = import.meta.env.BASE_URL;
-const FABRIC_GSM = 0.24; // kg/m^2, heavyweight cotton jersey
 
 let sharedPattern = null;
 let sharedTextures = null;
@@ -27,6 +27,88 @@ function loadTextures(renderer) {
   sharedTextures = { albedo, aux, knit, label };
   return sharedTextures;
 }
+
+let socksPattern = null;
+let socksTextures = null;
+function loadSocksTextures(renderer) {
+  if (socksTextures) return socksTextures;
+  const loader = new THREE.TextureLoader();
+  const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  const albedo = loader.load(BASE + 'textures/sock_albedo.jpg');
+  albedo.colorSpace = THREE.SRGBColorSpace;
+  albedo.anisotropy = aniso;
+  const rib = loader.load(BASE + 'textures/sock_rib.png');
+  rib.wrapS = rib.wrapT = THREE.RepeatWrapping;
+  rib.anisotropy = aniso;
+  socksTextures = { albedo, rib };
+  return socksTextures;
+}
+
+function makeSocksMaterial(tex, pat) {
+  const W = pat.pattern.window;
+  // 4 wales per tile, 2.4 mm each
+  tex.rib.repeat.set(((W.x1 - W.x0) * 2) / 0.0096, (W.y1 - W.y0) / 0.0096);
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    map: tex.albedo,
+    roughness: 0.92,
+    normalMap: tex.rib,
+    normalScale: new THREE.Vector2(0.7, 0.7),
+    specularIntensity: 0.18,
+    envMapIntensity: 0.3,
+    sheen: 1.0,
+    sheenRoughness: 0.6,
+    sheenColor: new THREE.Color(0x3a3d48),
+    side: THREE.DoubleSide,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+         if (!gl_FrontFacing) diffuseColor.rgb = vec3(0.012, 0.011, 0.011);`,
+      )
+      .replace(
+        'mapN.xy *= normalScale;',
+        `vec2 knitW = fwidth(vNormalMapUv);
+         float knitFade = 1.0 - smoothstep(0.18, 0.45, max(knitW.x, knitW.y));
+         mapN.xy *= normalScale * knitFade;`,
+      );
+  };
+  return mat;
+}
+
+// What differs between garment types. Everything else (cloth, carrying,
+// grabbing, rendering) is shared.
+const KINDS = {
+  tee: {
+    pattern: () => (sharedPattern ||= buildTeePattern(0.028)),
+    textures: (r) => loadTextures(r),
+    material: (tex) => makeFabricMaterial(tex),
+    gsm: 0.24, // kg/m^2, heavyweight cotton jersey
+    depth: 0.03,
+    label: true,
+    rims: [['neck', 0.0042, 8], ['cuffR', 0.0022, 6], ['cuffL', 0.0022, 6], ['hem', 0.0022, 6]],
+    rimColor: 0xefeee9,
+    rimSheen: 0xd8dae6,
+    pinLift: 0.006,
+    warm: 180,
+  },
+  socks: {
+    pattern: () => (socksPattern ||= buildSocksPattern(0.014)),
+    textures: (r) => loadSocksTextures(r),
+    material: (tex, pat) => makeSocksMaterial(tex, pat),
+    gsm: 0.42, // cushioned cotton knit
+    depth: 0.009,
+    label: false,
+    rims: [['cuff0', 0.0028, 6], ['cuff1', 0.0028, 6]],
+    rimColor: 0x141416,
+    rimSheen: 0x3a3d48,
+    pinLift: 0,
+    warm: 150,
+    cloth: { thickness: 0.007, bendCompliance: 0.006, selfRestMin: 0.035, dragCoeff: 0.8 },
+  },
+};
 
 function makeFabricMaterial(tex, { inside = false } = {}) {
   const W = sharedPattern.pattern.window;
@@ -84,12 +166,15 @@ export class Tee {
   /** static world colliders (walls, furniture) shared by every garment */
   static environment = [];
 
-  constructor({ renderer, hangerMatrix, name = 'tee', quality = 1, worn = null }) {
-    if (!sharedPattern) sharedPattern = buildTeePattern(0.028);
-    const pat = sharedPattern;
+  constructor({ renderer, hangerMatrix, name = 'tee', quality = 1, worn = null, kind = 'tee', product = null }) {
+    const K = KINDS[kind];
+    this.kind = kind;
+    this.K = K;
+    this.product = product;
+    const pat = K.pattern();
     this.pat = pat;
     this.name = name;
-    this.tex = loadTextures(renderer);
+    this.tex = K.textures(renderer);
     this.group = new THREE.Group();
     this.group.name = name;
     this.hangerMatrix = hangerMatrix.clone();
@@ -101,17 +186,20 @@ export class Tee {
     const n = pat.verts.length;
     // ---- distance to nearest seam: used to inflate the initial shape ----
     const seamPts = pat.verts.filter((v) => v.panel === -1);
+    const UX = (v) => v.ux ?? v.x;
+    const UY = (v) => v.uy ?? v.y;
     const init = new Float32Array(n * 3);
     const rest = new Float32Array(n * 3);
     const local = new THREE.Vector3();
     pat.verts.forEach((v, i) => {
       let d = Infinity;
-      if (v.panel !== -1) for (const s of seamPts) d = Math.min(d, Math.hypot(s.x - v.x, s.y - v.y));
-      else d = 0;
+      if (v.panel !== -1) {
+        for (const s of seamPts) if (s.sock === v.sock) d = Math.min(d, Math.hypot(UX(s) - UX(v), UY(s) - UY(v)));
+      } else d = 0;
       // hanging: nearly flat; worn: opened up around the body
       const wgt = Math.min(1, d / (worn ? 0.09 : 0.07));
-      const depth = worn ? worn.depth : 0.03;
-      const z = v.panel === FRONT ? depth * wgt : v.panel === BACK ? -depth * wgt : 0;
+      const depth = worn ? worn.depth : K.depth;
+      const z = (v.z0 || 0) + (v.panel === FRONT ? depth * wgt : v.panel === BACK ? -depth * wgt : 0);
       local.set(v.x, v.y, z).applyMatrix4(this.hangerMatrix);
       init.set([local.x, local.y, local.z], 3 * i);
       rest.set([v.x, v.y, z], 3 * i);
@@ -131,7 +219,7 @@ export class Tee {
     for (let t = 0; t < tris.length; t += 3) {
       const [a, b, c] = [tris[t], tris[t + 1], tris[t + 2]].map((i) => pat.verts[i]);
       const area = Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) / 2;
-      for (let k = 0; k < 3; k++) mass[tris[t + k]] += (area * FABRIC_GSM) / 3;
+      for (let k = 0; k < 3; k++) mass[tris[t + k]] += (area * K.gsm) / 3;
     }
     for (let i = 0; i < n; i++) if (mass[i] === 0) mass[i] = 1e-4;
 
@@ -148,6 +236,7 @@ export class Tee {
       }
     }
     const d2 = (i, j) => Math.hypot(pat.verts[i].x - pat.verts[j].x, pat.verts[i].y - pat.verts[j].y);
+    // (rest lengths come from the flat layout; the area above uses it too)
     const d3 = (i, j) =>
       Math.hypot(init[3 * i] - init[3 * j], init[3 * i + 1] - init[3 * j + 1], init[3 * i + 2] - init[3 * j + 2]);
     const stretch = [];
@@ -170,10 +259,11 @@ export class Tee {
       bend: new Float32Array(bend),
     });
     this.cloth.substeps = quality > 0.7 ? 8 : 6;
+    if (K.cloth) Object.assign(this.cloth, K.cloth);
 
     this._buildRenderMesh(tris, triPanel);
     this._buildRims();
-    this._buildLabel();
+    if (K.label) this._buildLabel();
     this.worn = !!worn;
     let warm = null;
     this.hangerLocal = new Map();
@@ -195,7 +285,8 @@ export class Tee {
       this._buildHanger();
       for (const id of pat.hangerIds) {
         const v = pat.verts[id];
-        this.hangerLocal.set(id, new THREE.Vector3(v.x, v.y + 0.006, 0));
+        // the clip/hanger pinches both layers together at its line
+        this.hangerLocal.set(id, new THREE.Vector3(v.x, v.y + K.pinLift, v.z0 || 0));
       }
       this._pinToHanger(true);
       this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
@@ -213,7 +304,7 @@ export class Tee {
       this._tmpD = new THREE.Vector3();
       this.liftT = 1;
       // settle into a natural drape (in the worker) before it is shown
-      warm = { steps: 180 };
+      warm = { steps: K.warm };
     }
     this.ke = 1;
     this.dirty = true;
@@ -246,7 +337,7 @@ export class Tee {
       if (!r.pos) c.computeNormals();
       this._writeRenderMesh();
       this._writeRims();
-      this._writeLabel();
+      if (this.label) this._writeLabel();
       this.dirty = false;
       this._readyRes();
     }
@@ -257,7 +348,8 @@ export class Tee {
     const pat = this.pat;
     const W = pat.pattern.window;
     const uvOf = (i, panel) => {
-      const { x, y } = pat.verts[i];
+      const x = pat.verts[i].ux ?? pat.verts[i].x;
+      const y = pat.verts[i].uy ?? pat.verts[i].y;
       const u = panel === BACK ? 0.5 + ((W.x1 - x) / (W.x1 - W.x0)) * 0.5 : ((x - W.x0) / (W.x1 - W.x0)) * 0.5;
       return [u, (y - W.y0) / (W.y1 - W.y0)];
     };
@@ -331,7 +423,7 @@ export class Tee {
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
     geo.setIndex(index);
     this.geometry = geo;
-    this.material = makeFabricMaterial(this.tex);
+    this.material = this.K.material(this.tex, this.pat);
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.castShadow = true;
     // hard spot-light self-shadows on a moving cloth read as dark blotches
@@ -346,19 +438,14 @@ export class Tee {
     // Rolled edges: a thin tube along each opening so the fabric reads as
     // having real thickness (rib collar is the thickest).
     const mat = new THREE.MeshPhysicalMaterial({
-      color: 0xefeee9,
+      color: this.K.rimColor,
       roughness: 0.92,
       sheen: 1,
       sheenRoughness: 0.5,
-      sheenColor: new THREE.Color(0xd8dae6),
+      sheenColor: new THREE.Color(this.K.rimSheen),
     });
     this.rims = [];
-    const spec = [
-      ['neck', 0.0042, 8],
-      ['cuffR', 0.0022, 6],
-      ['cuffL', 0.0022, 6],
-      ['hem', 0.0022, 6],
-    ];
+    const spec = this.K.rims;
     for (const [name, r, seg] of spec) {
       const loop = this.pat.loops[name];
       // the tube follows the smooth (tessellated) edge, not the coarse
@@ -397,6 +484,56 @@ export class Tee {
   }
 
   _buildHanger() {
+    if (this.kind === 'socks') return this._buildClipHanger();
+    this._buildWireHanger();
+  }
+
+  _buildClipHanger() {
+    // A chrome sock hanger: hook, short bar and a spring clip gripping the
+    // middle of each cuff.
+    const g = new THREE.Group();
+    const chrome = new THREE.MeshStandardMaterial({ color: 0xd9dde6, metalness: 1, roughness: 0.2 });
+    const black = new THREE.MeshStandardMaterial({ color: 0x0b0b0e, metalness: 0.3, roughness: 0.4 });
+    const off = this.pat.spec.pairOffset;
+    const xs = [0, off[0]];
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(off[0] + 0.06, 0.012, 0.006), black);
+    bar.position.set(off[0] / 2, 0.03, 0);
+    g.add(bar);
+    xs.forEach((x, k) => {
+      const z = k ? off[2] : 0;
+      const y = k ? off[1] : 0;
+      // clip jaws either side of the cuff + the arm down from the bar
+      for (const s of [-1, 1]) {
+        const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.022, 0.003), chrome);
+        jaw.position.set(x, y + 0.004, z + s * 0.0045);
+        g.add(jaw);
+      }
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.03 - y, 0.004), chrome);
+      arm.position.set(x, (0.03 + y) / 2 + 0.006, z);
+      g.add(arm);
+    });
+    // same hook geometry as the shirt hangers, so it sits on the same rail
+    const hx = off[0] / 2;
+    const hook = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(hx, 0.036, 0),
+      new THREE.Vector3(hx, 0.07, 0),
+      new THREE.Vector3(hx, 0.1, 0),
+      new THREE.Vector3(hx, 0.125, -0.02),
+      new THREE.Vector3(hx, 0.11, -0.04),
+      new THREE.Vector3(hx, 0.09, -0.035),
+    ]);
+    g.add(new THREE.Mesh(new THREE.TubeGeometry(hook, 30, 0.0026, 8, false), chrome));
+    for (const m of g.children) m.castShadow = true;
+    this.hangerColliders = [];
+    this.capsLocal = [];
+    this.cloth.colliders = [...Tee.environment];
+    g.matrixAutoUpdate = false;
+    g.matrix.copy(this.hangerMatrix);
+    this.hanger = g;
+    this.group.add(g);
+  }
+
+  _buildWireHanger() {
     // Brushed-chrome wire hanger with a matte black body, shaped to the shoulder line.
     const g = new THREE.Group();
     const chrome = new THREE.MeshStandardMaterial({ color: 0xd9dde6, metalness: 1, roughness: 0.18 });
@@ -612,7 +749,7 @@ export class Tee {
     this.dirty = false;
     this._writeRenderMesh();
     this._writeRims();
-    this._writeLabel();
+    if (this.label) this._writeLabel();
   }
 
   _writeRenderMesh() {

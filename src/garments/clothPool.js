@@ -83,6 +83,7 @@ export const clothPool = {
         damping: cloth.damping,
         dragCoeff: cloth.dragCoeff,
         selfCollision: cloth.selfCollision,
+        selfRestMin: cloth.selfRestMin,
         colliderFriction: cloth.colliderFriction || 0,
       },
       warm,
