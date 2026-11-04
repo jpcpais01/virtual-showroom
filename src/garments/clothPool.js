@@ -4,10 +4,11 @@
 // positions come back asynchronously and are copied in when ready. Falls back
 // to stepping on the main thread when module workers are unavailable.
 
-export const stat = { ms: 0, steps: {} };
+export const stat = { ms: 0, steps: {}, info: {} };
 
 let workers = null; // [{ w, pending }] or false
 let nextId = 1;
+let sharedNext = 0;
 const members = new Map(); // id -> { cloth, onResult, job, dtAcc, slot }
 
 function ensureWorkers() {
@@ -23,10 +24,13 @@ function ensureWorkers() {
         if (e.data.ms) stat.ms = stat.ms * 0.9 + e.data.ms * 0.1;
         for (const r of e.data.results) {
           stat.steps[r.id] = (stat.steps[r.id] || 0) + (r.simT || 0);
+          if (r.n) stat.info[r.id] = { n: r.n, sub: r.sub, stepMs: +(+r.stepMs).toFixed(2), dropped: +(+r.dropped).toFixed(2) };
           const m = members.get(r.id);
           if (m) m.onResult(r);
         }
       };
+      const slow = +new URLSearchParams(location.search).get('slow');
+      if (slow > 1) slot.w.postMessage({ type: 'cfg', slow });
       slot.w.onerror = (err) => console.warn('cloth worker error', err.message);
       workers.push(slot);
     }
@@ -44,10 +48,16 @@ export const clothPool = {
    * Register a cloth. `warm` = { steps, colliders?: [per step] } settles the
    * initial drape inside the worker; onResult fires once that is done.
    */
-  add(cloth, onResult, warm = null) {
+  add(cloth, onResult, warm = null, { dedicated = false } = {}) {
     const id = nextId++;
     const ws = ensureWorkers();
-    const slot = ws ? ws[(id - 1) % ws.length] : null;
+    // A garment that never sleeps (the DJ's shirt) gets the last worker to
+    // itself, so it never shares a core with the shirt you're holding.
+    let slot = null;
+    if (ws) {
+      const shared = ws.length > 1 ? ws.length - 1 : 1;
+      slot = dedicated ? ws[ws.length - 1] : ws[sharedNext++ % shared];
+    }
     members.set(id, { cloth, onResult, job: null, dtAcc: 0, slot });
     if (!slot) {
       // main-thread fallback: settle now

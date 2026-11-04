@@ -7,88 +7,101 @@
 // in the rest state; the spatial hash is built once per frame.
 
 class SpatialHash {
+  // Dense uniform grid over the garment's current bounding box (not a hashed
+  // table): a neighbourhood query then reads 9 contiguous runs of cells
+  // instead of hashing 27 scattered ones, which is several times faster.
   constructor(spacing, maxNumObjects) {
     this.spacing = spacing;
-    this.tableSize = 2 * maxNumObjects;
-    this.cellStart = new Int32Array(this.tableSize + 1);
+    this.cellStart = new Int32Array(1);
     this.cellEntries = new Int32Array(maxNumObjects);
-    this.queryIds = new Int32Array(maxNumObjects);
-    this.querySize = 0;
+    this.cellOf = new Int32Array(maxNumObjects);
     this.firstAdjId = new Int32Array(maxNumObjects + 1);
     this.adjIds = new Int32Array(16 * maxNumObjects);
   }
-  hashCoords(xi, yi, zi) {
-    const h = Math.imul(xi, 92837111) ^ Math.imul(yi, 689287499) ^ Math.imul(zi, 283923481);
-    return Math.abs(h) % this.tableSize;
-  }
-  intCoord(c) {
-    return Math.floor(c / this.spacing);
-  }
-  hashPos(pos, nr) {
-    return this.hashCoords(this.intCoord(pos[3 * nr]), this.intCoord(pos[3 * nr + 1]), this.intCoord(pos[3 * nr + 2]));
-  }
   create(pos, n) {
-    this.cellStart.fill(0);
-    this.cellEntries.fill(0);
-    for (let i = 0; i < n; i++) this.cellStart[this.hashPos(pos, i)]++;
-    let start = 0;
-    for (let i = 0; i < this.tableSize; i++) {
-      start += this.cellStart[i];
-      this.cellStart[i] = start;
-    }
-    this.cellStart[this.tableSize] = start;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
     for (let i = 0; i < n; i++) {
-      const h = this.hashPos(pos, i);
-      this.cellStart[h]--;
-      this.cellEntries[this.cellStart[h]] = i;
+      const x = pos[3 * i], y = pos[3 * i + 1], z = pos[3 * i + 2];
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+      if (z < z0) z0 = z;
+      if (z > z1) z1 = z;
     }
-  }
-  query(pos, nr, maxDist) {
-    const x0 = this.intCoord(pos[3 * nr] - maxDist);
-    const y0 = this.intCoord(pos[3 * nr + 1] - maxDist);
-    const z0 = this.intCoord(pos[3 * nr + 2] - maxDist);
-    const x1 = this.intCoord(pos[3 * nr] + maxDist);
-    const y1 = this.intCoord(pos[3 * nr + 1] + maxDist);
-    const z1 = this.intCoord(pos[3 * nr + 2] + maxDist);
-    this.querySize = 0;
-    for (let xi = x0; xi <= x1; xi++)
-      for (let yi = y0; yi <= y1; yi++)
-        for (let zi = z0; zi <= z1; zi++) {
-          const h = this.hashCoords(xi, yi, zi);
-          const start = this.cellStart[h];
-          const end = this.cellStart[h + 1];
-          for (let i = start; i < end; i++) this.queryIds[this.querySize++] = this.cellEntries[i];
-        }
+    let s = this.spacing;
+    // keep the grid a sane size even if the cloth is flung far apart
+    while ((x1 - x0) / s > 120 || (y1 - y0) / s > 120 || (z1 - z0) / s > 120) s *= 2;
+    this.s = s;
+    this.ox = x0;
+    this.oy = y0;
+    this.oz = z0;
+    const nx = (this.nx = Math.floor((x1 - x0) / s) + 1);
+    const ny = (this.ny = Math.floor((y1 - y0) / s) + 1);
+    const nz = (this.nz = Math.floor((z1 - z0) / s) + 1);
+    const cells = nx * ny * nz;
+    if (this.cellStart.length < cells + 1) this.cellStart = new Int32Array(cells + 1);
+    const cs = this.cellStart;
+    cs.fill(0, 0, cells + 1);
+    const inv = 1 / s;
+    for (let i = 0; i < n; i++) {
+      const cx = Math.floor((pos[3 * i] - x0) * inv);
+      const cy = Math.floor((pos[3 * i + 1] - y0) * inv);
+      const cz = Math.floor((pos[3 * i + 2] - z0) * inv);
+      const c = (cz * ny + cy) * nx + cx;
+      this.cellOf[i] = c;
+      cs[c]++;
+    }
+    let start = 0;
+    for (let c = 0; c < cells; c++) {
+      start += cs[c];
+      cs[c] = start;
+    }
+    cs[cells] = start;
+    for (let i = n - 1; i >= 0; i--) this.cellEntries[--cs[this.cellOf[i]]] = i;
   }
   queryAll(pos, n, maxDist, rest = null, restMin = 0) {
     let num = 0;
     const maxDist2 = maxDist * maxDist;
     const rMin2 = restMin * restMin;
+    const { s, ox, oy, oz, nx, ny, nz, cellStart: cs, cellEntries: ent } = this;
+    const inv = 1 / s;
     for (let i = 0; i < n; i++) {
       this.firstAdjId[i] = num;
-      this.query(pos, i, maxDist);
-      for (let j = 0; j < this.querySize; j++) {
-        const id1 = this.queryIds[j];
-        if (id1 >= i) continue;
-        const dx = pos[3 * id1] - pos[3 * i];
-        const dy = pos[3 * id1 + 1] - pos[3 * i + 1];
-        const dz = pos[3 * id1 + 2] - pos[3 * i + 2];
-        if (dx * dx + dy * dy + dz * dz > maxDist2) continue;
-        if (rest) {
-          // particles that are close in the rest state (same patch of fabric)
-          // are held apart by the stretch/bend constraints already
-          const rx = rest[3 * id1] - rest[3 * i];
-          const ry = rest[3 * id1 + 1] - rest[3 * i + 1];
-          const rz = rest[3 * id1 + 2] - rest[3 * i + 2];
-          if (rx * rx + ry * ry + rz * rz < rMin2) continue;
+      const px = pos[3 * i], py = pos[3 * i + 1], pz = pos[3 * i + 2];
+      const ax = Math.max(0, Math.floor((px - maxDist - ox) * inv));
+      const bx = Math.min(nx - 1, Math.floor((px + maxDist - ox) * inv));
+      const ay = Math.max(0, Math.floor((py - maxDist - oy) * inv));
+      const by = Math.min(ny - 1, Math.floor((py + maxDist - oy) * inv));
+      const az = Math.max(0, Math.floor((pz - maxDist - oz) * inv));
+      const bz = Math.min(nz - 1, Math.floor((pz + maxDist - oz) * inv));
+      for (let zi = az; zi <= bz; zi++)
+        for (let yi = ay; yi <= by; yi++) {
+          const row = (zi * ny + yi) * nx;
+          const end = cs[row + bx + 1];
+          for (let e = cs[row + ax]; e < end; e++) {
+            const id1 = ent[e];
+            if (id1 >= i) continue;
+            const dx = pos[3 * id1] - px;
+            const dy = pos[3 * id1 + 1] - py;
+            const dz = pos[3 * id1 + 2] - pz;
+            if (dx * dx + dy * dy + dz * dz > maxDist2) continue;
+            if (rest) {
+              // particles that are close in the rest state (same patch of
+              // fabric) are held apart by the stretch/bend constraints already
+              const rx = rest[3 * id1] - rest[3 * i];
+              const ry = rest[3 * id1 + 1] - rest[3 * i + 1];
+              const rz = rest[3 * id1 + 2] - rest[3 * i + 2];
+              if (rx * rx + ry * ry + rz * rz < rMin2) continue;
+            }
+            if (num >= this.adjIds.length) {
+              const grown = new Int32Array(2 * num);
+              grown.set(this.adjIds);
+              this.adjIds = grown;
+            }
+            this.adjIds[num++] = id1;
+          }
         }
-        if (num >= this.adjIds.length) {
-          const grown = new Int32Array(2 * num);
-          grown.set(this.adjIds);
-          this.adjIds = grown;
-        }
-        this.adjIds[num++] = id1;
-      }
     }
     this.firstAdjId[n] = num;
   }
@@ -159,8 +172,11 @@ export class Cloth {
     // Self collision neighbours are rebuilt every few substeps. The velocity
     // clamp below bounds how far anything can move in between, so the search
     // radius stays small however fast the cloth is being thrown around.
-    const rebuildEvery = this.rebuildEvery || 5;
+    const rebuildEvery = this.rebuildEvery || (this.substeps <= 4 ? this.substeps : Math.ceil(this.substeps / 2));
     const searchR = this.thickness * (1 + 0.3 * rebuildEvery) + 0.002;
+    // cells as big as the search radius: the query then visits ~27 small
+    // cells instead of sweeping a big neighbourhood (cost grows with r^3)
+    this.hash.spacing = searchR;
     // kinematic particles (hands, mouse) glide to their new targets across
     // the substeps instead of jumping there at the start of the step
     const kt = this.kinTargets;
@@ -175,6 +191,7 @@ export class Cloth {
       }
     }
 
+    this.activeColliders = this._nearColliders(dt);
     const damp = Math.max(0, 1 - this.damping * sdt);
     // velocity limit keeps self-collision robust: nothing may tunnel through
     // the fabric within one substep (Müller, Ten Minute Physics #15)
@@ -194,7 +211,8 @@ export class Cloth {
         this.hash.create(pos, n);
         this.hash.queryAll(pos, n, searchR, this.restPos, this.selfRestMin);
       }
-      this._aero(sdt);
+      // air drag changes slowly: every other substep is plenty
+      if (s % 2 === 0) this._aero(Math.min(2, this.substeps - s) * sdt);
       // The clamp only limits motion *relative to the garment as a whole*:
       // layers can't tunnel through each other, but the shirt as a whole can
       // move as fast as you swing it (a plain clamp made it feel like syrup).
@@ -233,7 +251,10 @@ export class Cloth {
         pos[k + 1] += vel[k + 1] * sdt;
         pos[k + 2] += vel[k + 2] * sdt;
       }
+      // with few substeps (slow CPU) a second stretch pass keeps the fabric
+      // from sagging; it is the cheapest part of the step
       this._solveDistances(this.stretch, this.stretchCompliance / (sdt * sdt));
+      if (this.substeps < 5) this._solveDistances(this.stretch, this.stretchCompliance / (sdt * sdt));
       this._solveDistances(this.bend, this.bendCompliance / (sdt * sdt));
       if (this.selfCollision) this._solveSelf();
       this._solveColliders();
@@ -354,6 +375,47 @@ export class Cloth {
     }
   }
 
+  // Only colliders near the cloth this step (the room has walls, plinths,
+  // hangers... that a held shirt is nowhere near).
+  _nearColliders(dt) {
+    const pos = this.pos;
+    const vel = this.vel;
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    let v2 = 0;
+    for (let k = 0; k < pos.length; k += 3) {
+      const x = pos[k], y = pos[k + 1], z = pos[k + 2];
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+      if (z < z0) z0 = z;
+      if (z > z1) z1 = z;
+      const s = vel[k] * vel[k] + vel[k + 1] * vel[k + 1] + vel[k + 2] * vel[k + 2];
+      if (s > v2) v2 = s;
+    }
+    const m = 0.1 + this.thickness + Math.sqrt(v2) * dt * 2;
+    x0 -= m; y0 -= m; z0 -= m; x1 += m; y1 += m; z1 += m;
+    const out = [];
+    for (const c of this.colliders) {
+      let a0, a1, b0, b1, c0, c1;
+      if (c.type === 'sphere') {
+        a0 = c.c[0] - c.r; a1 = c.c[0] + c.r; b0 = c.c[1] - c.r; b1 = c.c[1] + c.r; c0 = c.c[2] - c.r; c1 = c.c[2] + c.r;
+      } else if (c.type === 'box') {
+        a0 = c.min[0]; a1 = c.max[0]; b0 = c.min[1]; b1 = c.max[1]; c0 = c.min[2]; c1 = c.max[2];
+      } else if (c.type === 'capsule') {
+        a0 = Math.min(c.a[0], c.b[0]) - c.r; a1 = Math.max(c.a[0], c.b[0]) + c.r;
+        b0 = Math.min(c.a[1], c.b[1]) - c.r; b1 = Math.max(c.a[1], c.b[1]) + c.r;
+        c0 = Math.min(c.a[2], c.b[2]) - c.r; c1 = Math.max(c.a[2], c.b[2]) + c.r;
+      } else {
+        out.push(c);
+        continue;
+      }
+      if (a1 < x0 || a0 > x1 || b1 < y0 || b0 > y1 || c1 < z0 || c0 > z1) continue;
+      out.push(c);
+    }
+    return out;
+  }
+
   _solveColliders() {
     const pos = this.pos;
     const w = this.invMass;
@@ -372,7 +434,7 @@ export class Cloth {
     const pad = this.thickness * 0.5;
     const prev = this.prev;
     const fr = this.colliderFriction;
-    for (const c of this.colliders) {
+    for (const c of this.activeColliders || this.colliders) {
       if (c.type === 'sphere') {
         const r = c.r + pad;
         for (let i = 0; i < n; i++) {

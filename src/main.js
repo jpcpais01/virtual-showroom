@@ -622,4 +622,4 @@ function tick() {
 requestAnimationFrame(tick);
 
 // debugging hooks
-window.__khora = { stats: () => ({ updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded, workerMs: +clothStat.ms.toFixed(2), steps: { ...clothStat.steps }, frames }), setBench: (b) => (benchMode = b), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };
+window.__khora = { stats: () => ({ updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded, workerMs: +clothStat.ms.toFixed(2), steps: { ...clothStat.steps }, info: { ...clothStat.info }, frames }), setBench: (b) => (benchMode = b), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };
