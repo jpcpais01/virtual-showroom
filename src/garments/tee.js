@@ -39,11 +39,14 @@ function makeFabricMaterial(tex, { inside = false } = {}) {
     roughness: 1.0,
     roughnessMap: tex.aux,
     bumpMap: tex.aux,
-    bumpScale: 1.2,
+    bumpScale: 0.7,
     normalMap: knit,
-    normalScale: new THREE.Vector2(0.35, 0.35),
+    normalScale: new THREE.Vector2(0.4, 0.4),
+    // cotton jersey is matte: very little specular, soft sheen at grazing angles
+    specularIntensity: 0.22,
+    envMapIntensity: 0.35,
     sheen: 1.0,
-    sheenRoughness: 0.55,
+    sheenRoughness: 0.7,
     sheenColor: new THREE.Color(0xd8dae6),
     side: THREE.DoubleSide,
     shadowSide: THREE.DoubleSide,
@@ -51,11 +54,25 @@ function makeFabricMaterial(tex, { inside = false } = {}) {
   if (inside) return mat;
   // The inside of the shirt is plain cotton: no print, slightly shaded.
   mat.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <map_fragment>',
-      `#include <map_fragment>
-       if (!gl_FrontFacing) diffuseColor.rgb = vec3(0.93, 0.925, 0.91);`,
-    );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <map_fragment>',
+        `#include <map_fragment>
+         if (!gl_FrontFacing) diffuseColor.rgb = vec3(0.93, 0.925, 0.91);`,
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+         roughnessFactor = max(roughnessFactor, 0.8);`,
+      )
+      // the knit is only visible up close: fade it out once a stitch gets
+      // smaller than a pixel, otherwise it aliases into stripes (moire)
+      .replace(
+        'mapN.xy *= normalScale;',
+        `vec2 knitW = fwidth(vNormalMapUv);
+         float knitFade = 1.0 - smoothstep(0.18, 0.45, max(knitW.x, knitW.y));
+         mapN.xy *= normalScale * knitFade;`,
+      );
   };
   return mat;
 }
@@ -68,7 +85,7 @@ export class Tee {
   static environment = [];
 
   constructor({ renderer, hangerMatrix, name = 'tee', quality = 1, worn = null }) {
-    if (!sharedPattern) sharedPattern = buildTeePattern(0.032);
+    if (!sharedPattern) sharedPattern = buildTeePattern(0.028);
     const pat = sharedPattern;
     this.pat = pat;
     this.name = name;
@@ -159,7 +176,6 @@ export class Tee {
     this._buildLabel();
     this.worn = !!worn;
     let warm = null;
-    this.pinTargets = new Map(); // id -> {target, from, t}
     this.hangerLocal = new Map();
     if (worn) {
       this.cloth.colliders = worn.colliders();
@@ -183,8 +199,21 @@ export class Tee {
       }
       this._pinToHanger(true);
       this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
+      this.restPos = new THREE.Vector3();
+      this.restQuat = new THREE.Quaternion();
+      this.hangerMatrix.decompose(this.restPos, this.restQuat, new THREE.Vector3());
+      this.livePos = this.restPos.clone();
+      this.liveQuat = this.restQuat.clone();
+      this.carryPos = this.restPos.clone();
+      this.carryQuat = this.restQuat.clone();
+      this.liveMatrix = this.hangerMatrix.clone();
+      this._one = new THREE.Vector3(1, 1, 1);
+      this._tmpV = new THREE.Vector3();
+      this._tmpV2 = new THREE.Vector3();
+      this._tmpD = new THREE.Vector3();
+      this.liftT = 1;
       // settle into a natural drape (in the worker) before it is shown
-      warm = { steps: 90 };
+      warm = { steps: 180 };
     }
     this.ke = 1;
     this.dirty = true;
@@ -238,6 +267,7 @@ export class Tee {
     // physics runs on the coarser mesh. Points on a shared edge depend only on
     // that edge, so neighbouring triangles always meet without cracks.
     const SUB = this.quality > 0.7 ? 4 : 3;
+    this.SUB = SUB;
     const keyMap = new Map();
     const A = [], B = [], C = [], WA = [], WB = [], WC = [];
     const uvs = [];
@@ -304,7 +334,9 @@ export class Tee {
     this.material = makeFabricMaterial(this.tex);
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.castShadow = true;
-    this.mesh.receiveShadow = true;
+    // hard spot-light self-shadows on a moving cloth read as dark blotches
+    // (and acne); fold shading comes from the normals instead
+    this.mesh.receiveShadow = false;
     this.mesh.frustumCulled = false;
     this.mesh.userData.tee = this;
     this.group.add(this.mesh);
@@ -329,7 +361,9 @@ export class Tee {
     ];
     for (const [name, r, seg] of spec) {
       const loop = this.pat.loops[name];
-      const n = loop.length;
+      // the tube follows the smooth (tessellated) edge, not the coarse
+      // simulation polygon, so it never sinks inside the fabric
+      const n = loop.length * this.SUB;
       const pos = new Float32Array(n * seg * 3);
       const nrm = new Float32Array(n * seg * 3);
       const idx = [];
@@ -375,12 +409,14 @@ export class Tee {
       const ax = Math.abs(x);
       // follow shoulder slope beyond the neck point
       const y = ax < P.N[0] ? 0.012 - (ax / P.N[0]) * 0.012 : -((ax - P.N[0]) / (P.S[0] - P.N[0])) * -P.S[1];
-      pts.push(new THREE.Vector3(x, y - 0.012, 0));
+      pts.push(new THREE.Vector3(x, y - 0.022, 0));
     }
     const curve = new THREE.CatmullRomCurve3(pts);
     // the cloth wraps over the hanger arm: capsule colliders along it
     this.hangerColliders = [];
+    this.capsLocal = [];
     for (let i = 0; i < pts.length - 1; i += 5) {
+      this.capsLocal.push([pts[i].clone(), pts[Math.min(i + 5, pts.length - 1)].clone()]);
       const a = pts[i].clone().applyMatrix4(this.hangerMatrix);
       const b = pts[Math.min(i + 5, pts.length - 1)].clone().applyMatrix4(this.hangerMatrix);
       // thin: the solver pads colliders by half the cloth thickness, and the
@@ -389,17 +425,17 @@ export class Tee {
       this.hangerColliders.push({ type: 'capsule', a: a.toArray(), b: b.toArray(), r: 0.012 });
     }
     this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
-    const arm = new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.009, 12, false), body);
+    const arm = new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.0065, 12, false), body);
     arm.castShadow = true;
     g.add(arm);
     for (const s of [-1, 1]) {
-      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.009, 16, 12), body);
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.0065, 16, 12), body);
       cap.position.copy(pts[s < 0 ? 0 : pts.length - 1]);
       g.add(cap);
     }
     const hook = new THREE.CurvePath();
     const hookPts = [
-      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, -0.012, 0),
       new THREE.Vector3(0, 0.07, 0),
       new THREE.Vector3(0, 0.1, 0.0),
       new THREE.Vector3(0, 0.125, -0.02),
@@ -417,75 +453,83 @@ export class Tee {
   }
 
   // ------------------------------------------------------------ pinning
-  _pinToHanger(immediate) {
-    const cloth = this.cloth;
+  _pinToHanger() {
     for (const [id, lp] of this.hangerLocal) {
       const target = lp.clone().applyMatrix4(this.hangerMatrix);
-      if (immediate) {
-        cloth.pin(id, target.x, target.y, target.z);
-      } else {
-        const p = cloth.pos;
-        this.pinTargets.set(id, {
-          from: new THREE.Vector3(p[3 * id], p[3 * id + 1], p[3 * id + 2]),
-          target,
-          t: 0,
-          dur: 0.45,
-        });
-        cloth.invMass[id] = 0;
-      }
+      this.cloth.pin(id, target.x, target.y, target.z);
     }
   }
 
-  releaseFromHanger() {
-    for (const id of this.hangerLocal.keys()) {
-      if (!this.pat.holdIds.includes(id)) this.cloth.unpin(id);
-      this.pinTargets.delete(id);
-    }
-  }
+  // ------------------------------------------------------------ carrying
+  // Picking a tee up lifts the whole hanger off the rail: the shoulders stay
+  // pinned to the hanger exactly as when it hangs, and only the hanger moves
+  // (smoothly, speed-limited). That keeps the drape stable however you turn
+  // or carry it, where pinching two loose points used to tangle the fabric.
 
-  /** Pick up: the two dropped-shoulder points are pinched and carried to `targets`. */
-  hold(left, right) {
+  /** carry the hanger towards this pose (world position + rotation) */
+  carryTo(pos, quat) {
     this.wake();
-    if (this.state === 'hanging' || this.state === 'returning') {
-      this.releaseFromHanger();
-      this.cloth.colliders = [...Tee.environment];
+    if (this.state !== 'held') {
       this.state = 'held';
+      this.liftT = 0;
     }
-    const [ia, ib] = this.pat.holdIds;
-    // holdIds[0] is +x (wearer's left / viewer's right when facing front)
-    this._setHold(ia, right);
-    this._setHold(ib, left);
-  }
-
-  _setHold(id, target) {
-    const c = this.cloth;
-    c.invMass[id] = 0;
-    const cur = new THREE.Vector3(c.pos[3 * id], c.pos[3 * id + 1], c.pos[3 * id + 2]);
-    // ease towards the hand position with a speed limit, so the fabric trails
-    // naturally and the solver never sees a teleport
-    const d = target.clone().sub(cur).multiplyScalar(0.18);
-    const maxStep = 1.4 / 60;
-    if (d.length() > maxStep) d.setLength(maxStep);
-    cur.add(d);
-    c.pos[3 * id] = cur.x;
-    c.pos[3 * id + 1] = cur.y;
-    c.pos[3 * id + 2] = cur.z;
-  }
-
-  holdPoint(k) {
-    const id = this.pat.holdIds[k];
-    const p = this.cloth.pos;
-    return new THREE.Vector3(p[3 * id], p[3 * id + 1], p[3 * id + 2]);
+    this.carryPos.copy(pos);
+    this.carryQuat.copy(quat);
   }
 
   returnToHanger() {
     this.wake();
     this.state = 'returning';
-    // no hanger collision while it slides back on, or the fabric can end up
-    // on the wrong side of the arm and snag; it comes back once seated
-    this.cloth.colliders = [...Tee.environment];
-    for (const id of this.pat.holdIds) this.cloth.unpin(id);
-    this._pinToHanger(false);
+    this.carryPos.copy(this.restPos);
+    this.carryQuat.copy(this.restQuat);
+  }
+
+  _moveHanger(dt) {
+    const lp = this.livePos, lq = this.liveQuat;
+    let tp = this.carryPos;
+    // lift straight up off the rail first, so the hook clears the bar
+    if (this.state === 'held' && this.liftT < 1) {
+      this.liftT = Math.min(1, this.liftT + dt / 0.35);
+      if (this.liftT < 1) tp = this._tmpV.copy(this.restPos).setY(this.restPos.y + 0.09 * this.liftT);
+    }
+    const d = this._tmpD.copy(tp).sub(lp);
+    const step = d.clone().multiplyScalar(1 - Math.exp(-dt * 7));
+    const maxStep = 2.6 * dt; // m/s
+    if (step.length() > maxStep) step.setLength(maxStep);
+    lp.add(step);
+    // turn gently (angular speed capped) so the sleeves swing, not flip
+    const ang = lq.angleTo(this.carryQuat);
+    if (ang > 1e-5) {
+      const want = ang * (1 - Math.exp(-dt * 4));
+      lq.rotateTowards(this.carryQuat, Math.min(want, 2.2 * dt));
+    }
+    this.liveMatrix.compose(lp, lq, this._one);
+    this.hanger.matrix.copy(this.liveMatrix);
+    // pins follow the hanger
+    const c = this.cloth;
+    const v = this._tmpV2;
+    for (const [id, l] of this.hangerLocal) {
+      if (this.grabbed && this.grabbed.id === id) continue;
+      v.copy(l).applyMatrix4(this.liveMatrix);
+      c.pos[3 * id] = v.x;
+      c.pos[3 * id + 1] = v.y;
+      c.pos[3 * id + 2] = v.z;
+    }
+    this.capsLocal.forEach(([a, b], k) => {
+      const cap = this.hangerColliders[k];
+      v.copy(a).applyMatrix4(this.liveMatrix);
+      cap.a = v.toArray();
+      v.copy(b).applyMatrix4(this.liveMatrix);
+      cap.b = v.toArray();
+    });
+    c.colliders = [...Tee.environment, ...this.hangerColliders];
+    if (this.state === 'returning' && lp.distanceTo(this.restPos) < 0.002 && lq.angleTo(this.restQuat) < 0.004) {
+      lp.copy(this.restPos);
+      lq.copy(this.restQuat);
+      this.liveMatrix.copy(this.hangerMatrix);
+      this.hanger.matrix.copy(this.hangerMatrix);
+      this.state = 'hanging';
+    }
   }
 
   wake() {
@@ -518,8 +562,7 @@ export class Tee {
   release() {
     if (!this.grabbed) return;
     const { id, wasMass } = this.grabbed;
-    const stillPinned = this.pinTargets.has(id) || (this.state !== 'held' && this.hangerLocal.has(id)) ||
-      (this.state === 'held' && this.pat.holdIds.includes(id));
+    const stillPinned = this.hangerLocal.has(id);
     if (!stillPinned) this.cloth.invMass[id] = wasMass || this.cloth.baseInvMass[id];
     this.grabbed = null;
   }
@@ -544,22 +587,7 @@ export class Tee {
   // ------------------------------------------------------------ per frame
   update(dt, { wind, paused = false } = {}) {
     const c = this.cloth;
-    // animate pins sliding back onto the hanger
-    if (this.pinTargets.size) {
-      for (const [id, pt] of this.pinTargets) {
-        pt.t = Math.min(1, pt.t + dt / pt.dur);
-        const e = pt.t * pt.t * (3 - 2 * pt.t);
-        const v = pt.from.clone().lerp(pt.target, e);
-        c.pos[3 * id] = v.x;
-        c.pos[3 * id + 1] = v.y;
-        c.pos[3 * id + 2] = v.z;
-        if (pt.t >= 1) this.pinTargets.delete(id);
-      }
-      if (!this.pinTargets.size && this.state === 'returning') {
-        this.state = 'hanging';
-        this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
-      }
-    }
+    if (this.hanger && this.state !== 'hanging' && this.state !== 'worn') this._moveHanger(dt);
     if (wind) c.wind = wind;
     if (dt > 0 && !this.asleep && !paused && this.isReady) {
       clothPool.request(this.poolId, dt);
@@ -567,8 +595,10 @@ export class Tee {
       // a garment left alone on its hanger comes to rest (real fabric has
       // internal friction), then sleeps
       this.idleT = this.state === 'hanging' && !this.grabbed ? (this.idleT || 0) + dt : 0;
-      c.damping = this.idleT > 1.2 && !this.alwaysAwake ? 3.5 : 0.6;
-      if (this.state === 'hanging' && !this.grabbed && !this.alwaysAwake) {
+      // (give it a few seconds first, so a tee that was just put back or
+      // pulled can swing out and untwist before it is calmed down)
+      c.damping = this.idleT > 4 && !this.alwaysAwake ? 3.5 : 0.6;
+      if (this.state === 'hanging' && !this.grabbed && !this.alwaysAwake && this.idleT > 4) {
         if (this.ke < 2e-4) this.sleepTimer += dt;
         else this.sleepTimer = 0;
         if (this.sleepTimer > 1.0) this.asleep = true;
@@ -622,28 +652,53 @@ export class Tee {
   _writeRims() {
     const P = this.cloth.pos;
     const Nn = this.cloth.normals;
+    const S = this.SUB;
+    const alpha = 0.65;
     const t = new THREE.Vector3(), n = new THREE.Vector3(), b = new THREE.Vector3();
     for (const rim of this.rims) {
       const { loop, r, seg, geo } = rim;
       const pos = geo.attributes.position.array;
       const nrm = geo.attributes.normal.array;
       const L = loop.length;
+      const M = L * S;
+      if (!rim.ep || rim.ep.length !== M * 3) {
+        rim.ep = new Float32Array(M * 3);
+        rim.en = new Float32Array(M * 3);
+      }
+      const ep = rim.ep, en = rim.en;
+      // points on the Phong-tessellated boundary edges (same formula as the mesh)
       for (let i = 0; i < L; i++) {
-        const p = 3 * loop[i];
-        const pn = 3 * loop[(i + 1) % L];
-        const pp = 3 * loop[(i - 1 + L) % L];
-        t.set(P[pn] - P[pp], P[pn + 1] - P[pp + 1], P[pn + 2] - P[pp + 2]).normalize();
-        n.set(Nn[p], Nn[p + 1], Nn[p + 2]);
+        const a = 3 * loop[i], c = 3 * loop[(i + 1) % L];
+        for (let k = 0; k < S; k++) {
+          const v = k / S, u = 1 - v;
+          const px = u * P[a] + v * P[c], py = u * P[a + 1] + v * P[c + 1], pz = u * P[a + 2] + v * P[c + 2];
+          const da = (px - P[a]) * Nn[a] + (py - P[a + 1]) * Nn[a + 1] + (pz - P[a + 2]) * Nn[a + 2];
+          const dc = (px - P[c]) * Nn[c] + (py - P[c + 1]) * Nn[c + 1] + (pz - P[c + 2]) * Nn[c + 2];
+          const o = 3 * (i * S + k);
+          ep[o] = px - alpha * (u * da * Nn[a] + v * dc * Nn[c]);
+          ep[o + 1] = py - alpha * (u * da * Nn[a + 1] + v * dc * Nn[c + 1]);
+          ep[o + 2] = pz - alpha * (u * da * Nn[a + 2] + v * dc * Nn[c + 2]);
+          en[o] = u * Nn[a] + v * Nn[c];
+          en[o + 1] = u * Nn[a + 1] + v * Nn[c + 1];
+          en[o + 2] = u * Nn[a + 2] + v * Nn[c + 2];
+        }
+      }
+      for (let i = 0; i < M; i++) {
+        const p = 3 * i;
+        const pn = 3 * ((i + 1) % M);
+        const pp = 3 * ((i - 1 + M) % M);
+        t.set(ep[pn] - ep[pp], ep[pn + 1] - ep[pp + 1], ep[pn + 2] - ep[pp + 2]).normalize();
+        n.set(en[p], en[p + 1], en[p + 2]);
         b.crossVectors(t, n).normalize();
         n.crossVectors(b, t).normalize();
-        for (let s = 0; s < seg; s++) {
-          const ang = (s / seg) * Math.PI * 2;
+        for (let s2 = 0; s2 < seg; s2++) {
+          const ang = (s2 / seg) * Math.PI * 2;
           const cx = Math.cos(ang), sy = Math.sin(ang);
           const ox = n.x * cx + b.x * sy, oy = n.y * cx + b.y * sy, oz = n.z * cx + b.z * sy;
-          const k = 3 * (i * seg + s);
-          pos[k] = P[p] + ox * r;
-          pos[k + 1] = P[p + 1] + oy * r;
-          pos[k + 2] = P[p + 2] + oz * r;
+          const k = 3 * (i * seg + s2);
+          pos[k] = ep[p] + ox * r;
+          pos[k + 1] = ep[p + 1] + oy * r;
+          pos[k + 2] = ep[p + 2] + oz * r;
           nrm[k] = ox; nrm[k + 1] = oy; nrm[k + 2] = oz;
         }
       }

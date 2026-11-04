@@ -315,6 +315,8 @@ function unfocus() {
 }
 function pickUp() {
   if (!focused) return;
+  if (putting && putting !== focused) putting.returnToHanger();
+  putting = null;
   held = focused;
   holdYaw = 0;
   holdYawTarget = 0;
@@ -322,12 +324,18 @@ function pickUp() {
   controls.flyTo(controls.pos, controls.yaw, -0.04);
   pickBtn.textContent = 'Put it back';
   turnBtn.hidden = false;
-  panelHint.textContent = 'Drag the background to turn it in your hands. Scroll to bring it closer. Grab the fabric to pull it.';
+  panelHint.textContent = 'Drag the background to turn the hanger. Scroll to bring it closer. Grab the fabric to pull it.';
   controls.lockMove = true;
 }
+let putting = null; // tee being turned to face front before it goes back
 function putBack() {
   if (!held) return;
-  held.returnToHanger();
+  // turn it to face front in your hands first, then hang it up, so it never
+  // twists around the hanger on the way back
+  if (Math.abs(holdYaw) > 0.25) {
+    holdYawTarget = Math.round(holdYaw / (2 * Math.PI)) * 2 * Math.PI;
+    putting = held;
+  } else held.returnToHanger();
   held = null;
   pickBtn.textContent = 'Pick it up';
   turnBtn.hidden = true;
@@ -412,12 +420,20 @@ const studio = new THREE.SpotLight(0xfff7f0, 0, 4, 0.6, 0.9, 1.5);
 scene.add(studio, studio.target);
 let studioK = 0;
 
+const UP = new THREE.Vector3(0, 1, 0);
+const carryQuat = new THREE.Quaternion();
 function updateHeld(dt, t) {
   studioK += ((held ? 1 : 0) - studioK) * Math.min(1, dt * 3);
   studio.intensity = 2.2 * studioK;
   grade.uniforms.uVig.value = 0.62 - 0.22 * studioK;
-  if (!held) return;
   holdYaw += (holdYawTarget - holdYaw) * Math.min(1, dt * 4);
+  const carried = held || putting;
+  if (!carried) return;
+  if (putting && Math.abs(holdYaw - holdYawTarget) < 0.15) {
+    putting.returnToHanger();
+    putting = null;
+    return;
+  }
   camera.getWorldDirection(fwd);
   fwd.y = 0;
   fwd.normalize();
@@ -425,13 +441,13 @@ function updateHeld(dt, t) {
   const centre = camera.position.clone().addScaledVector(fwd, holdDist);
   // keep the garment clear of the product panel on wide screens
   if (!panel.hidden && innerWidth > 720) centre.addScaledVector(right, -0.22 * holdDist);
-  // hands just above eye level, with a little natural sway
-  centre.y = camera.position.y + 0.28 + Math.sin(t * 1.1) * 0.008;
-  centre.addScaledVector(right, Math.sin(t * 0.7) * 0.01);
-  const yaw = holdYaw + Math.sin(t * 0.45) * 0.05;
-  const halfSpan = 0.26;
-  const off = right.clone().multiplyScalar(Math.cos(yaw) * halfSpan).addScaledVector(fwd, Math.sin(yaw) * halfSpan);
-  held.hold(centre.clone().sub(off), centre.clone().add(off));
+  // the hanger is held up at about eye level, facing you, with a little
+  // natural hand sway
+  centre.y = camera.position.y + 0.3 + Math.sin(t * 1.1) * 0.006;
+  centre.addScaledVector(right, Math.sin(t * 0.7) * 0.008);
+  const yaw = controls.yaw + holdYaw + Math.sin(t * 0.45) * 0.04;
+  carryQuat.setFromAxisAngle(UP, yaw);
+  carried.carryTo(centre, carryQuat);
   studio.position.copy(camera.position).addScaledVector(right, 0.7).add(new THREE.Vector3(0, 0.9, 0)).addScaledVector(fwd, 0.1);
   studio.target.position.copy(centre).add(new THREE.Vector3(0, -0.3, 0));
 }
@@ -501,7 +517,7 @@ function tick() {
     const wind = [Math.sin(t * 0.31) * 0.12, 0, 0.1 + Math.sin(t * 0.53 + 1) * 0.12];
     // garments you cannot see wait (frozen) instead of using CPU; while you
     // hold one, everything else waits so it gets the whole budget
-    const busy = tee === held || (grab && grab.tee === tee);
+    const busy = tee === held || tee === putting || tee.state !== 'hanging' || (grab && grab.tee === tee);
     const paused = !busy && (!!held || !frustum.intersectsSphere(teeSphere(tee)));
     tee.update(dt, { wind: tee === hero ? wind : [0, 0, 0], paused });
   }
