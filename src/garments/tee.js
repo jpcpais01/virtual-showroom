@@ -68,7 +68,7 @@ export class Tee {
   static environment = [];
 
   constructor({ renderer, hangerMatrix, name = 'tee', quality = 1, worn = null }) {
-    if (!sharedPattern) sharedPattern = buildTeePattern(0.024);
+    if (!sharedPattern) sharedPattern = buildTeePattern(0.032);
     const pat = sharedPattern;
     this.pat = pat;
     this.name = name;
@@ -152,7 +152,7 @@ export class Tee {
       stretch: new Float32Array(stretch),
       bend: new Float32Array(bend),
     });
-    this.cloth.substeps = quality > 0.7 ? 10 : 7;
+    this.cloth.substeps = quality > 0.7 ? 8 : 6;
 
     this._buildRenderMesh(tris, triPanel);
     this._buildRims();
@@ -237,7 +237,7 @@ export class Tee {
     // tessellated curved surface, so folds and silhouettes stay smooth while
     // physics runs on the coarser mesh. Points on a shared edge depend only on
     // that edge, so neighbouring triangles always meet without cracks.
-    const SUB = this.quality > 0.7 ? 3 : 2;
+    const SUB = this.quality > 0.7 ? 4 : 3;
     const keyMap = new Map();
     const A = [], B = [], C = [], WA = [], WB = [], WC = [];
     const uvs = [];
@@ -369,7 +369,7 @@ export class Tee {
     const body = new THREE.MeshStandardMaterial({ color: 0x0b0b0e, metalness: 0.2, roughness: 0.45 });
     const P = this.pat.pattern;
     const pts = [];
-    const span = 0.2;
+    const span = 0.185; // arm ends stay hidden inside the shoulders
     for (let i = -20; i <= 20; i++) {
       const x = (i / 20) * span;
       const ax = Math.abs(x);
@@ -383,7 +383,10 @@ export class Tee {
     for (let i = 0; i < pts.length - 1; i += 5) {
       const a = pts[i].clone().applyMatrix4(this.hangerMatrix);
       const b = pts[Math.min(i + 5, pts.length - 1)].clone().applyMatrix4(this.hangerMatrix);
-      this.hangerColliders.push({ type: 'capsule', a: a.toArray(), b: b.toArray(), r: 0.024 });
+      // thin: the solver pads colliders by half the cloth thickness, and the
+      // shoulder seam is pinned right on this line, so a fat capsule kept
+      // shoving the fabric next to the seam and made it buzz on the hanger
+      this.hangerColliders.push({ type: 'capsule', a: a.toArray(), b: b.toArray(), r: 0.012 });
     }
     this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
     const arm = new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.009, 12, false), body);
@@ -478,7 +481,9 @@ export class Tee {
   returnToHanger() {
     this.wake();
     this.state = 'returning';
-    this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
+    // no hanger collision while it slides back on, or the fabric can end up
+    // on the wrong side of the arm and snag; it comes back once seated
+    this.cloth.colliders = [...Tee.environment];
     for (const id of this.pat.holdIds) this.cloth.unpin(id);
     this._pinToHanger(false);
   }
@@ -550,7 +555,10 @@ export class Tee {
         c.pos[3 * id + 2] = v.z;
         if (pt.t >= 1) this.pinTargets.delete(id);
       }
-      if (!this.pinTargets.size && this.state === 'returning') this.state = 'hanging';
+      if (!this.pinTargets.size && this.state === 'returning') {
+        this.state = 'hanging';
+        this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
+      }
     }
     if (wind) c.wind = wind;
     if (dt > 0 && !this.asleep && !paused && this.isReady) {
