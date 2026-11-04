@@ -63,14 +63,53 @@ const stage = buildStage(scene);
     [[ROOM.x1 - 2.03, -1, -1.53], [ROOM.x1 - 1.17, 1.06, 0.93]], // cash desk
   ].map(([min, max]) => ({ type: 'box', min, max }));
 }
+// product copy for the panel (names and specs are placeholders to confirm)
+const PRODUCTS = {
+  tee: {
+    eyebrow: 'KHORA · Drop 01',
+    title: 'Heart Tee',
+    colour: 'White / Royal blue',
+    swatch: 'white',
+    bullets: ['Oversized, dropped shoulder', 'Embroidered K♡ monogram on the chest', 'Royal blue thorn-heart print on the back', 'Woven KHORA neck label', 'Cotton jersey, rib collar'],
+    focusDist: 1.75,
+    centreDrop: 0.36,
+    holdDist: 1.05,
+    holdY: 0.3,
+  },
+  socks: {
+    eyebrow: 'KHORA · Drop 01',
+    title: 'Thorn Socks',
+    colour: 'Black / Royal blue',
+    swatch: 'black',
+    bullets: ['Ribbed crew length', 'Royal blue thorn jacquard around the calf', 'KHORA knitted into the sole', 'Cushioned cotton knit', 'Sold as a pair'],
+    focusDist: 0.75,
+    centreDrop: 0.17,
+    holdDist: 0.72,
+    holdY: 0.15,
+  },
+};
 const tees = [];
-const hero = new Tee({ renderer, hangerMatrix: room.heroHanger, name: 'hero', quality });
+const hero = new Tee({ renderer, hangerMatrix: room.heroHanger, name: 'hero', quality, product: PRODUCTS.tee });
 scene.add(hero.group);
 tees.push(hero);
 for (const [i, m] of room.nicheHangers.entries()) {
-  const t = new Tee({ renderer, hangerMatrix: m, name: `rail-${i}`, quality });
+  const t = new Tee({ renderer, hangerMatrix: m, name: `rail-${i}`, quality, product: PRODUCTS.tee });
   scene.add(t.group);
   tees.push(t);
+}
+// the socks hang on the same rail, between the two shirts
+{
+  const a = new THREE.Vector3().setFromMatrixPosition(room.nicheHangers[0]);
+  const b = new THREE.Vector3().setFromMatrixPosition(room.nicheHangers[1]);
+  const m = room.nicheHangers[0].clone();
+  const mid = a.add(b).multiplyScalar(0.5);
+  // centre the pair on the hook (the hanger origin is at the first sock)
+  const side = new THREE.Vector3(1, 0, 0).transformDirection(m);
+  mid.addScaledVector(side, -0.05);
+  m.setPosition(mid);
+  const socks = new Tee({ renderer, hangerMatrix: m, name: 'socks', quality, kind: 'socks', product: PRODUCTS.socks });
+  scene.add(socks.group);
+  tees.push(socks);
 }
 // the DJ wears one too, simulated against the mannequin's body
 const dj = stage.dj;
@@ -206,12 +245,23 @@ function pick(ev) {
 }
 
 function teeFocusSpot(tee) {
-  // stand ~1.7m in front of the garment, looking at it
+  // stand in front of the garment (closer for small pieces), looking at it
+  const pr = tee.product || PRODUCTS.tee;
   const front = new THREE.Vector3(0, 0, 1).transformDirection(tee.hangerMatrix);
   const c = new THREE.Vector3().setFromMatrixPosition(tee.hangerMatrix);
-  const pos = c.clone().addScaledVector(front, 1.75);
+  const pos = c.clone().addScaledVector(front, pr.focusDist);
   pos.y = 1.62;
-  return { pos, yaw: Math.atan2(-front.x, -front.z) + Math.PI, pitch: -0.06, lookAt: c.clone().setY(1.62) };
+  const cy = c.y - pr.centreDrop;
+  const pitch = THREE.MathUtils.clamp(Math.atan2(cy - 1.62, pr.focusDist), -0.3, 0.35);
+  return { pos, yaw: Math.atan2(-front.x, -front.z) + Math.PI, pitch, lookAt: c.clone().setY(cy) };
+}
+
+function showProduct(pr) {
+  panel.querySelector('.panel__eyebrow').textContent = pr.eyebrow;
+  panel.querySelector('.panel__title').textContent = pr.title;
+  panel.querySelector('.panel__colour').innerHTML = `<span class="swatch swatch--${pr.swatch}"></span> ${pr.colour}`;
+  const ul = panel.querySelector('.panel__list');
+  ul.replaceChildren(...pr.bullets.map((b) => Object.assign(document.createElement('li'), { textContent: b })));
 }
 
 controls.onTap = (ev) => {
@@ -262,7 +312,7 @@ controls.onLookDrag = (dx) => {
 };
 controls.onWheel = (dy) => {
   if (!held) return false;
-  holdDist = THREE.MathUtils.clamp(holdDist + dy * 0.0008, 0.6, 1.6);
+  holdDist = THREE.MathUtils.clamp(holdDist + dy * 0.0008, 0.35, 1.6);
   return true;
 };
 // hover test at most once per frame
@@ -301,8 +351,9 @@ function focus(tee) {
   hint(null);
   const s = teeFocusSpot(tee);
   controls.flyTo(s.pos, s.yaw, s.pitch);
+  showProduct(tee.product || PRODUCTS.tee);
   panel.hidden = false;
-  pickBtn.textContent = 'Pick it up';
+  pickBtn.textContent = tee.kind === 'socks' ? 'Pick them up' : 'Pick it up';
   turnBtn.hidden = true;
   panelHint.textContent = 'Click and drag the fabric to pull it, or pick it up to look closer.';
 }
@@ -320,9 +371,9 @@ function pickUp() {
   held = focused;
   holdYaw = 0;
   holdYawTarget = 0;
-  holdDist = 1.05;
+  holdDist = (held.product || PRODUCTS.tee).holdDist;
   controls.flyTo(controls.pos, controls.yaw, -0.04);
-  pickBtn.textContent = 'Put it back';
+  pickBtn.textContent = held.kind === 'socks' ? 'Put them back' : 'Put it back';
   turnBtn.hidden = false;
   panelHint.textContent = 'Drag the background to turn the hanger. Scroll to bring it closer. Grab the fabric to pull it.';
   controls.lockMove = true;
@@ -336,8 +387,10 @@ function putBack() {
     holdYawTarget = Math.round(holdYaw / (2 * Math.PI)) * 2 * Math.PI;
     putting = held;
   } else held.returnToHanger();
+  pickBtn.textContent = held.kind === 'socks' ? 'Pick them up' : 'Pick it up';
+  // look back at where it hangs
+  controls.flyTo(controls.pos, controls.yaw, teeFocusSpot(held).pitch);
   held = null;
-  pickBtn.textContent = 'Pick it up';
   turnBtn.hidden = true;
   controls.lockMove = false;
   panelHint.textContent = 'Click and drag the fabric to pull it, or pick it up to look closer.';
@@ -443,7 +496,7 @@ function updateHeld(dt, t) {
   if (!panel.hidden && innerWidth > 720) centre.addScaledVector(right, -0.22 * holdDist);
   // the hanger is held up at about eye level, facing you, with a little
   // natural hand sway
-  centre.y = camera.position.y + 0.3 + Math.sin(t * 1.1) * 0.006;
+  centre.y = camera.position.y + (carried.product || PRODUCTS.tee).holdY + Math.sin(t * 1.1) * 0.006;
   centre.addScaledVector(right, Math.sin(t * 0.7) * 0.008);
   const yaw = controls.yaw + holdYaw + Math.sin(t * 0.45) * 0.04;
   carryQuat.setFromAxisAngle(UP, yaw);

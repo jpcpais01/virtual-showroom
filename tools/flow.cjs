@@ -11,6 +11,7 @@ const { chromium } = require('playwright');
   await page.goto('http://127.0.0.1:5173/?auto&nolock&bench', { timeout: 120000 });
   await page.waitForFunction(() => window.__khora && !document.getElementById('enterActions').hidden, null, { timeout: 150000 });
   await page.waitForTimeout(1500);
+  if (process.env.TARGET) await page.evaluate((t) => (window.__target = t), process.env.TARGET);
   const shot = async (name) => { await page.evaluate(() => window.__khora.setBench(false)); await page.waitForTimeout(1500); await page.screenshot({ path: `${out}/f_${name}.png`, timeout: 200000 }); console.log('shot', name); await page.evaluate(() => window.__khora.setBench(true)); };
   for (const s of steps) {
     if (s === 'booth' || s === 'rail' || s === 'entrance') {
@@ -26,12 +27,12 @@ const { chromium } = require('playwright');
       await shot(name);
     }
     if (s === 'focus') {
-      await page.evaluate(() => { const K = window.__khora; K.focus(K.hero); const c = K.controls; c.fly = null; c.pos.copy(K.spots.hero.pos); c.yaw = c.yawT = 0; c.pitch = c.pitchT = -0.02; });
+      await page.evaluate(() => { const K = window.__khora; const t = K.tees.find((x) => x.name === (window.__target || 'hero')) || K.hero; K.focus(t); const c = K.controls; const f = c.fly; c.fly = null; if (t !== K.hero && f) { c.pos.copy(f.to); c.yaw = c.yawT = f.yaw1; c.pitch = c.pitchT = f.p1; } if (t === K.hero) { c.pos.copy(K.spots.hero.pos); c.yaw = c.yawT = 0; c.pitch = c.pitchT = -0.02; } });
       await page.waitForTimeout(3000);
       await shot('focus');
     }
     if (s === 'hold') {
-      await page.evaluate(() => { const K = window.__khora; K.focus(K.hero); const c = K.controls; c.fly = null; c.pos.copy(K.spots.hero.pos); c.yaw = c.yawT = 0; c.pitch = c.pitchT = -0.02; });
+      await page.evaluate(() => { const K = window.__khora; const t = K.tees.find((x) => x.name === (window.__target || 'hero')) || K.hero; K.focus(t); const c = K.controls; const f = c.fly; c.fly = null; if (t !== K.hero && f) { c.pos.copy(f.to); c.yaw = c.yawT = f.yaw1; c.pitch = c.pitchT = f.p1; } if (t === K.hero) { c.pos.copy(K.spots.hero.pos); c.yaw = c.yawT = 0; c.pitch = c.pitchT = -0.02; } });
       await page.waitForTimeout(3000);
       await page.evaluate(() => window.__khora.pickUp());
       await page.waitForTimeout(+(process.env.HOLDWAIT || 30000));

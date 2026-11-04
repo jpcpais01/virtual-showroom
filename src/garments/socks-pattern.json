@@ -1,0 +1,16 @@
+{
+  "_": "Flat pattern of one KHORA crew sock (metres, cuff at y=0, toe towards -x). Front and back layers are joined along the outline except at the cuff. Shared by tools/build_sock_textures.py and src/garments/socksMesh.js.",
+  "outline": {
+    "legRight": [[0.045, 0], [0.045, -0.235]],
+    "heel": [[0.045, -0.235], [0.062, -0.33], [-0.005, -0.337]],
+    "sole": [[-0.005, -0.337], [-0.165, -0.337]],
+    "toe": [[-0.165, -0.337], [-0.222, -0.33], [-0.204, -0.272]],
+    "instep": [[-0.204, -0.272], [-0.12, -0.232], [-0.045, -0.2]],
+    "legFront": [[-0.045, -0.2], [-0.045, 0]]
+  },
+  "window": { "x0": -0.23, "x1": 0.07, "y0": -0.345, "y1": 0.005 },
+  "cuffRib": [0, -0.032],
+  "band": [-0.042, -0.108],
+  "sole": { "x0": -0.15, "x1": -0.035, "y": -0.322, "h": 0.016 },
+  "pairOffset": [0.1, 0, -0.012]
+}
