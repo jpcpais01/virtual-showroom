@@ -7,6 +7,7 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { buildRoom, ROOM } from './scene/room.js';
 import { buildStage } from './scene/stage.js';
 import { FloorReflection } from './scene/reflection.js';
+import { batchStatic } from './scene/batch.js';
 import { Tee } from './garments/tee.js';
 import { clothPool, stat as clothStat } from './garments/clothPool.js';
 import { RaveAudio } from './audio.js';
@@ -99,6 +100,20 @@ const djTee = new Tee({
 djTee.label.visible = false;
 scene.add(djTee.group);
 const grabbables = tees;
+
+// merge everything that never moves into one draw call per material
+if (!params.has('nobatch')) {
+  const sections = ['groove', 'build', 'break', 'drop'];
+  const res = batchStatic(scene, [room.group, stage.group], {
+    exclude: [room.floor, dj.group],
+    probe: (k) => {
+      const info = { t: k * 0.73 + 0.1, beat: k, bar: k, phase: (k * 0.37) % 1, section: sections[k % 4], kick: (k % 3) / 2, snare: k % 2, buildUp: (k % 5) / 5, bpm: 126, energy: [0.6, 0.75, 0.35, 1][k % 4] };
+      stage.update(1 / 60, info);
+      room.update(info);
+    },
+  });
+  if (params.has('debug')) console.log('static batching', res);
+}
 
 // environment reflections for chrome / glossy surfaces, captured once
 const pmrem = new THREE.PMREMGenerator(renderer);
@@ -387,7 +402,6 @@ if (params.has('auto')) sceneReady.then(() => enter(false));
 // ---------------------------------------------------------------- loop
 const clock = new THREE.Clock();
 let frameAvg = 16;
-let lowTimer = 0;
 let listenerTimer = 0;
 const tmp = new THREE.Vector3();
 const fwd = new THREE.Vector3();
@@ -442,6 +456,21 @@ function updateReticle(dt) {
   reticle.classList.toggle('is-hot', !!hit);
 }
 
+// resolution levels: [pixel ratio cap, floor reflection scale]
+const GOV = [[1.5, 0.35], [1.25, 0.3], [1, 0.25], [0.85, 0.2], [0.7, 0.16]];
+let govLevel = GOV.findIndex(([pr]) => pr <= pixelRatio + 1e-3);
+if (govLevel < 0) govLevel = 0;
+const govFloor = govLevel;
+let govTimer = -4; // let the first seconds settle before judging
+let lastFrameAt = 0;
+function setGov(level) {
+  govLevel = level;
+  const [pr, refl] = GOV[level];
+  renderer.setPixelRatio(Math.min(devicePixelRatio, pr));
+  composer.setPixelRatio(renderer.getPixelRatio());
+  reflection.scale = refl;
+  resize();
+}
 let cpuAvg = 0;
 let frames = 0;
 let benchMode = params.has('bench');
@@ -502,18 +531,23 @@ function tick() {
   updateReticle(dt);
   if (warmFrames >= 0 && ++warmFrames === 4 && onWarm) onWarm();
 
-  // simple quality governor
-  frameAvg = frameAvg * 0.95 + dt * 1000 * 0.05;
-  if (frameAvg > 34 && quality > 0.5) {
-    lowTimer += dt;
-    if (lowTimer > 3) {
-      quality = 0.5;
-      renderer.setPixelRatio(1);
-      reflection.scale = 0.2;
-      resize();
-      lowTimer = 0;
+  // Resolution governor: when frames are slow (e.g. a laptop in quiet /
+  // battery mode), render fewer pixels until it is smooth again, and step
+  // back up when there is headroom.
+  const now = performance.now();
+  const raw = lastFrameAt ? now - lastFrameAt : 16;
+  lastFrameAt = now;
+  if (raw < 250) frameAvg = frameAvg * 0.94 + raw * 0.06;
+  govTimer += dt;
+  if (govTimer > 1.2) {
+    if (frameAvg > 21 && govLevel < GOV.length - 1) {
+      setGov(govLevel + 1);
+      govTimer = 0;
+    } else if (frameAvg < 12.5 && govLevel > govFloor) {
+      setGov(govLevel - 1);
+      govTimer = -6; // be slow to climb back so it does not flip-flop
     }
-  } else lowTimer = 0;
+  }
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
