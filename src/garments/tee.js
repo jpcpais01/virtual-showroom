@@ -312,7 +312,7 @@ export class Tee {
     this.ready = new Promise((res) => (this._readyRes = res));
     this.isReady = false;
     this.group.visible = false;
-    this.poolId = clothPool.add(this.cloth, (r) => this._onResult(r), warm);
+    this.poolId = clothPool.add(this.cloth, (r) => this._onResult(r), warm, { dedicated: !!worn });
   }
 
   _onResult(r) {
