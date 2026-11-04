@@ -119,14 +119,14 @@ export class Cloth {
     this.bend = o.bend;
 
     this.stretchCompliance = 2e-7;
-    this.bendCompliance = 0.04;
+    this.bendCompliance = 0.025;
     this.thickness = 0.02;
     this.friction = 0.12;
     this.damping = 0.6; // linear air damping (1/s)
     this.dragCoeff = 1.2; // aerodynamic drag coefficient of the cloth faces
     this.gravity = -9.81;
     this.substeps = 10;
-    this.selfRestMin = 0.05; // skip self-collision pairs closer than this at rest
+    this.selfRestMin = 0.065; // skip self-collision pairs closer than this at rest
     this.floorY = 0.002;
     this.selfCollision = true;
     this.wind = [0, 0, 0]; // air velocity (m/s), acts through face drag
