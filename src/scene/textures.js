@@ -53,14 +53,23 @@ function canvasTex(size, fill, { srgb = true, repeat = 1 } = {}) {
 }
 
 /** polished micro-cement: albedo + roughness pair */
-export function concrete({ base = [26, 27, 31], spread = 14, seed = 3, size = 512, repeat = 4 } = {}) {
+export function concrete({ base = [26, 27, 31], spread = 14, seed = 3, size = 512, repeat = 4, joint = 0 } = {}) {
   const n = fbm(size, seed, 6, 3);
   const speck = fbm(size, seed + 9, 2, 64);
+  // saw-cut joints along the tile edges (one per repeat): 0 = none, else px
+  const jw = joint;
+  const jointAt = (i) => {
+    if (!jw) return 0;
+    const x = i % size, y = (i / size) | 0;
+    const dx = Math.min(x, size - 1 - x), dy = Math.min(y, size - 1 - y);
+    const d = Math.min(dx, dy);
+    return d < jw ? 1 : d < jw + 1.5 ? 0.35 : 0;
+  };
   const albedo = canvasTex(
     size,
     (d) => {
       for (let i = 0; i < n.length; i++) {
-        const v = (n[i] - 0.5) * spread + (speck[i] > 0.72 ? 6 : 0);
+        const v = (n[i] - 0.5) * spread + (speck[i] > 0.72 ? 6 : 0) - jointAt(i) * 9;
         d[4 * i] = base[0] + v;
         d[4 * i + 1] = base[1] + v;
         d[4 * i + 2] = base[2] + v * 1.05;
@@ -73,7 +82,7 @@ export function concrete({ base = [26, 27, 31], spread = 14, seed = 3, size = 51
     size,
     (d) => {
       for (let i = 0; i < n.length; i++) {
-        const r = 150 + (n[i] - 0.5) * 120 + (speck[i] - 0.5) * 40;
+        const r = 150 + (n[i] - 0.5) * 120 + (speck[i] - 0.5) * 40 + jointAt(i) * 90;
         d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = Math.max(0, Math.min(255, r));
         d[4 * i + 3] = 255;
       }
@@ -116,4 +125,55 @@ export function grille(size = 256, holes = 24) {
     },
     { repeat: 1 },
   );
+}
+
+/**
+ * Centred lines of text on a transparent (or solid `bg`) canvas, for plaques
+ * and screens. Redrawn once the web font has loaded.
+ * lines: [{ text, size, weight, spacing (em), alpha, gap (px above) }]
+ */
+export function textTex(lines, w = 1024, h = 256, bg = null) {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d');
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  const draw = () => {
+    g.clearRect(0, 0, w, h);
+    if (bg) {
+      const grd = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w * 0.7);
+      grd.addColorStop(0, bg);
+      grd.addColorStop(1, '#020614');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, w, h);
+    }
+    const total = lines.reduce((a, l) => a + l.size + (l.gap || 0), 0);
+    let y = (h - total) / 2;
+    for (const l of lines) {
+      y += l.gap || 0;
+      g.font = `${l.weight || 500} ${l.size}px Inter, 'Helvetica Neue', Arial, sans-serif`;
+      g.fillStyle = `rgba(255,255,255,${l.alpha ?? 1})`;
+      g.textBaseline = 'top';
+      // letter spacing by hand (canvas letterSpacing is not everywhere yet)
+      const sp = (l.spacing || 0) * l.size;
+      const chars = [...l.text];
+      const width = chars.reduce((a, ch) => a + g.measureText(ch).width, 0) + sp * (chars.length - 1);
+      let x = (w - width) / 2;
+      for (const ch of chars) {
+        g.fillText(ch, x, y);
+        x += g.measureText(ch).width + sp;
+      }
+      y += l.size;
+    }
+    t.needsUpdate = true;
+  };
+  draw();
+  if (document.fonts && document.fonts.load) {
+    Promise.all(lines.map((l) => document.fonts.load(`${l.weight || 500} ${l.size}px Inter`)))
+      .then(draw)
+      .catch(() => {});
+  }
+  return t;
 }

@@ -119,6 +119,7 @@ self.onmessage = (e) => {
       }
       if (!steps) continue;
       const res = result(job.id, c, steps, simT);
+      if (job.tag) res.r.tag = job.tag;
       out.push(res.r);
       transfer.push(...res.transfer);
     }

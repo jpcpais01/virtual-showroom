@@ -6,6 +6,7 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { buildRoom, ROOM } from './scene/room.js';
 import { buildStage } from './scene/stage.js';
+import { buildDetails } from './scene/details.js';
 import { FloorReflection } from './scene/reflection.js';
 import { batchStatic } from './scene/batch.js';
 import { Tee } from './garments/tee.js';
@@ -14,6 +15,7 @@ import { RaveAudio } from './audio.js';
 import { WalkControls } from './controls.js';
 
 const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
 const isMobile = matchMedia('(pointer: coarse)').matches || Math.min(innerWidth, innerHeight) < 600;
 let quality = params.has('low') ? 0.5 : isMobile ? 0.7 : 1;
 
@@ -34,19 +36,27 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x020308);
 scene.fog = new THREE.FogExp2(0x03050c, 0.032);
 
-const camera = new THREE.PerspectiveCamera(56, innerWidth / innerHeight, 0.03, 60);
+const BASE_FOV = 56;
+const FOCUS_FOV = 42; // a longer "lens" when looking at a piece: flatter, more like a product shot
+const camera = new THREE.PerspectiveCamera(BASE_FOV, innerWidth / innerHeight, 0.03, 60);
 
 // ---------------------------------------------------------------- loading
 const progressEl = document.getElementById('progress');
-THREE.DefaultLoadingManager.onProgress = (_u, loaded, total) => {
-  progressEl.style.width = `${Math.round((loaded / total) * 85)}%`;
-};
+const progressPct = document.getElementById('progressPct');
+let progressShown = 0;
+function setProgress(p) {
+  progressShown = Math.max(progressShown, Math.round(p));
+  progressEl.style.width = `${progressShown}%`;
+  progressPct.textContent = progressShown;
+}
+THREE.DefaultLoadingManager.onProgress = (_u, loaded, total) => setProgress((loaded / total) * 65);
 const texturesReady = new Promise((res) => (THREE.DefaultLoadingManager.onLoad = res));
 
 // ---------------------------------------------------------------- world
 const reflection = new FloorReflection(quality < 1 ? 0.25 : 0.35);
 const room = buildRoom(scene, reflection);
 const stage = buildStage(scene);
+const details = buildDetails(scene, room, reflection);
 
 // solid things the cloth must not pass through when you pull or carry it
 {
@@ -71,6 +81,7 @@ const PRODUCTS = {
     colour: 'White / Royal blue',
     swatch: 'white',
     bullets: ['Oversized, dropped shoulder', 'Embroidered K♡ monogram on the chest', 'Royal blue thorn-heart print on the back', 'Woven KHORA neck label', 'Cotton jersey, rib collar'],
+    specs: [['Fit', 'Oversized'], ['Fabric', 'Cotton'], ['Colour', 'White']],
     focusDist: 1.75,
     centreDrop: 0.36,
     holdDist: 1.05,
@@ -82,6 +93,7 @@ const PRODUCTS = {
     colour: 'Black / Royal blue',
     swatch: 'black',
     bullets: ['Ribbed crew length', 'Royal blue thorn jacquard around the calf', 'KHORA knitted into the sole', 'Cushioned cotton knit', 'Sold as a pair'],
+    specs: [['Length', 'Crew'], ['Knit', 'Rib'], ['Colour', 'Black']],
     focusDist: 0.75,
     centreDrop: 0.17,
     holdDist: 0.72,
@@ -143,7 +155,7 @@ const grabbables = tees;
 // merge everything that never moves into one draw call per material
 if (!params.has('nobatch')) {
   const sections = ['groove', 'build', 'break', 'drop'];
-  const res = batchStatic(scene, [room.group, stage.group], {
+  const res = batchStatic(scene, [room.group, stage.group, details.group], {
     exclude: [room.floor, dj.group],
     probe: (k) => {
       const info = { t: k * 0.73 + 0.1, beat: k, bar: k, phase: (k * 0.37) % 1, section: sections[k % 4], kick: (k % 3) / 2, snare: k % 2, buildUp: (k % 5) / 5, bpm: 126, energy: [0.6, 0.75, 0.35, 1][k % 4] };
@@ -175,10 +187,15 @@ const grade = new ShaderPass({
     uniform sampler2D tDiffuse; uniform float uTime; uniform float uVig; varying vec2 vUv;
     float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)) + uTime) * 43758.5453); }
     void main(){
-      vec3 c = texture2D(tDiffuse, vUv).rgb;
       vec2 d = vUv - 0.5;
-      c *= mix(1.0, uVig, smoothstep(0.2, 0.95, dot(d, d) * 2.2));
-      c += (h(vUv * 1000.0) - 0.5) * 0.018;
+      float r2 = dot(d, d);
+      // a touch of lens fringing towards the corners (none in the middle)
+      vec2 off = d * r2 * 0.007;
+      vec3 c = vec3(texture2D(tDiffuse, vUv - off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv + off).b);
+      // gentle S-curve: deeper blacks, a little more punch in the mids
+      c = mix(c, c * c * (3.0 - 2.0 * c), 0.22);
+      c *= mix(1.0, uVig, smoothstep(0.2, 0.95, r2 * 2.2));
+      c += (h(vUv * 1000.0) - 0.5) * 0.016;
       gl_FragColor = vec4(c, 1.0);
     }`,
 });
@@ -194,6 +211,7 @@ function resize() {
   const pr = renderer.getPixelRatio();
   reflection.setSize(w * pr, h * pr);
   grade.uniforms.uRes.value.set(w, h);
+  details.setPixelRatio(pr);
 }
 addEventListener('resize', resize);
 resize();
@@ -219,7 +237,12 @@ controls.onUnlockedClick = () => {
   return true;
 };
 const reticle = document.getElementById('reticle');
-if (!controls.mouseLook) document.querySelector('.intro__hint').textContent = isMobile ? 'Drag to look around · tap the floor to walk · tap a piece to inspect it' : 'Drag to look around · WASD or click the floor to walk · Click a piece to inspect it';
+if (!controls.mouseLook) {
+  const ih = $('introHint');
+  ih.textContent = isMobile ? 'Drag to look around · tap the floor to walk · tap a piece to inspect it' : 'Drag to look around · WASD or click the floor to walk · Click a piece to inspect it';
+  ih.hidden = false;
+  $('introKeys').hidden = true;
+}
 controls.onLockChange = (locked) => {
   reticle.hidden = !locked;
   if (locked) hint('Move the mouse to look · WASD to walk · click a shirt · Esc for the cursor', 5000);
@@ -253,11 +276,25 @@ function teeFocusSpot(tee) {
   pos.y = 1.62;
   const cy = c.y - pr.centreDrop;
   const pitch = THREE.MathUtils.clamp(Math.atan2(cy - 1.62, pr.focusDist), -0.3, 0.35);
-  return { pos, yaw: Math.atan2(-front.x, -front.z) + Math.PI, pitch, lookAt: c.clone().setY(cy) };
+  // with the product panel on the right, turn a little so the piece sits in
+  // the middle of the free space to its left
+  let yaw = Math.atan2(-front.x, -front.z) + Math.PI;
+  if (innerWidth > 720) {
+    const focal = innerHeight / 2 / Math.tan(THREE.MathUtils.degToRad(FOCUS_FOV / 2));
+    yaw -= Math.atan(170 / focal);
+  }
+  return { pos, yaw, pitch, lookAt: c.clone().setY(cy) };
 }
 
 function showProduct(pr) {
   panel.querySelector('.panel__eyebrow').textContent = pr.eyebrow;
+  $('panelSpecs').replaceChildren(
+    ...(pr.specs || []).map(([k, v]) => {
+      const d = document.createElement('div');
+      d.append(Object.assign(document.createElement('dt'), { textContent: k }), Object.assign(document.createElement('dd'), { textContent: v }));
+      return d;
+    }),
+  );
   panel.querySelector('.panel__title').textContent = pr.title;
   panel.querySelector('.panel__colour').innerHTML = `<span class="swatch swatch--${pr.swatch}"></span> ${pr.colour}`;
   const ul = panel.querySelector('.panel__list');
@@ -327,11 +364,84 @@ canvas.addEventListener('pointermove', (ev) => {
 });
 
 // ---------------------------------------------------------------- UI
-const $ = (id) => document.getElementById(id);
 const panel = $('panel');
 const pickBtn = $('pickBtn');
 const turnBtn = $('turnBtn');
 const panelHint = $('panelHint');
+const setPickLabel = (t) => ($('pickLabel').textContent = t);
+// one entry per product, in the order the pager walks through them
+const pieces = [hero, ...tees.filter((t) => t.kind === 'socks')];
+function stepPiece(dir) {
+  if (!pieces.length) return;
+  const cur = focused ? pieces.findIndex((p) => p.product === focused.product) : -1;
+  const next = pieces[(cur + dir + pieces.length) % pieces.length];
+  if (held) putBack();
+  focus(next);
+}
+$('prevPiece').onclick = () => stepPiece(-1);
+$('nextPiece').onclick = () => stepPiece(1);
+
+// ---- area nav: a pill slides under the area you are in
+const navBtns = [...document.querySelectorAll('[data-goto]')];
+const navPill = document.createElement('span');
+navPill.className = 'hud__pill';
+document.querySelector('.hud__nav').prepend(navPill);
+let navActive = null;
+function setActiveNav(key) {
+  navActive = key;
+  const b = navBtns.find((x) => x.dataset.goto === key);
+  for (const x of navBtns) x.classList.toggle('is-active', x === b);
+  if (!b || !b.offsetWidth) {
+    navPill.style.opacity = 0;
+    return;
+  }
+  const w = `${b.offsetWidth}px`;
+  const tr = `translateX(${b.offsetLeft}px)`;
+  if (navPill.style.width === w && navPill.style.transform === tr) return;
+  // first time it shows: appear in place instead of sliding in from the side
+  const first = navPill.style.opacity !== '1';
+  if (first) navPill.style.transition = 'none';
+  navPill.style.width = w;
+  navPill.style.transform = tr;
+  navPill.style.opacity = 1;
+  if (first) {
+    void navPill.offsetWidth;
+    navPill.style.transition = '';
+  }
+}
+addEventListener('resize', () => navActive && setActiveNav(navActive));
+function areaAt(p) {
+  if (p.x < -3.2 && p.z < 3) return 'rail';
+  if (p.z < -1.2 && Math.abs(p.x) < 5) return 'booth';
+  if (Math.abs(p.x) < 2.6 && p.z < 4.2) return 'hero';
+  return 'entrance';
+}
+
+// ---- controls legend (H)
+const keysPanel = $('keysPanel');
+const helpBtn = $('helpToggle');
+{
+  const cap = (k, wide) => `<span class="keys__cap${wide ? ' keys__cap--wide' : ''}">${k}</span>`;
+  const rows = [
+    [cap('Mouse', 1), 'Look around'],
+    [cap('W') + cap('A') + cap('S') + cap('D'), 'Walk'],
+    [cap('Shift', 1), 'Walk faster'],
+    [cap('Click', 1), 'Inspect a piece'],
+    [cap('E'), 'Pick up / put back'],
+    [cap('Drag', 1), 'Pull the fabric'],
+    [cap('Esc', 1), 'Show the cursor'],
+    [cap('H'), 'Hide this'],
+  ];
+  $('hudKeys').innerHTML = rows.map(([k, t]) => `<li>${k}<span>${t}</span></li>`).join('');
+}
+let keysTimer = 0;
+function showKeys(on, ms = 0) {
+  clearTimeout(keysTimer);
+  keysPanel.hidden = !on;
+  helpBtn.setAttribute('aria-pressed', String(on));
+  if (on && ms) keysTimer = setTimeout(() => showKeys(false), ms);
+}
+helpBtn.onclick = () => showKeys(keysPanel.hidden);
 let hintTimer = 0;
 function hint(text, ms = 0) {
   const el = $('hint');
@@ -351,11 +461,20 @@ function focus(tee) {
   hint(null);
   const s = teeFocusSpot(tee);
   controls.flyTo(s.pos, s.yaw, s.pitch);
+  const wasOpen = !panel.hidden;
   showProduct(tee.product || PRODUCTS.tee);
   panel.hidden = false;
-  pickBtn.textContent = tee.kind === 'socks' ? 'Pick them up' : 'Pick it up';
+  if (wasOpen) {
+    panel.classList.remove('is-swap');
+    void panel.offsetWidth;
+    panel.classList.add('is-swap');
+  }
+  const idx = Math.max(0, pieces.findIndex((p) => p.product === tee.product));
+  $('pieceCount').textContent = `${String(idx + 1).padStart(2, '0')} / ${String(pieces.length).padStart(2, '0')}`;
+  setPickLabel(tee.kind === 'socks' ? 'Pick them up' : 'Pick it up');
+  setActiveNav(tee === hero ? 'hero' : 'rail');
   turnBtn.hidden = true;
-  panelHint.textContent = 'Click and drag the fabric to pull it, or pick it up to look closer.';
+  panelHint.textContent = isMobile ? 'Drag the fabric to pull it, or pick it up to look closer.' : 'Click and drag the fabric to pull it, or pick it up to look closer.';
 }
 function unfocus() {
   if (held) putBack();
@@ -373,9 +492,9 @@ function pickUp() {
   holdYawTarget = 0;
   holdDist = (held.product || PRODUCTS.tee).holdDist;
   controls.flyTo(controls.pos, controls.yaw, -0.04);
-  pickBtn.textContent = held.kind === 'socks' ? 'Put them back' : 'Put it back';
+  setPickLabel(held.kind === 'socks' ? 'Put them back' : 'Put it back');
   turnBtn.hidden = false;
-  panelHint.textContent = 'Drag the background to turn the hanger. Scroll to bring it closer. Grab the fabric to pull it.';
+  panelHint.textContent = isMobile ? 'Drag the background to turn it. Grab the fabric to pull it.' : 'Drag the background to turn the hanger. Scroll to bring it closer. Grab the fabric to pull it.';
   controls.lockMove = true;
 }
 let putting = null; // tee being turned to face front before it goes back
@@ -387,19 +506,20 @@ function putBack() {
     holdYawTarget = Math.round(holdYaw / (2 * Math.PI)) * 2 * Math.PI;
     putting = held;
   } else held.returnToHanger();
-  pickBtn.textContent = held.kind === 'socks' ? 'Pick them up' : 'Pick it up';
+  setPickLabel(held.kind === 'socks' ? 'Pick them up' : 'Pick it up');
   // look back at where it hangs
   controls.flyTo(controls.pos, controls.yaw, teeFocusSpot(held).pitch);
   held = null;
   turnBtn.hidden = true;
   controls.lockMove = false;
-  panelHint.textContent = 'Click and drag the fabric to pull it, or pick it up to look closer.';
+  panelHint.textContent = isMobile ? 'Drag the fabric to pull it, or pick it up to look closer.' : 'Click and drag the fabric to pull it, or pick it up to look closer.';
 }
 pickBtn.onclick = () => (held ? putBack() : pickUp());
 turnBtn.onclick = () => (holdYawTarget += Math.PI);
 $('panelClose').onclick = unfocus;
 addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && focused) unfocus();
+  if ((e.key === 'h' || e.key === 'H') && controls.enabled) showKeys(keysPanel.hidden);
   if (e.key === 'e' || e.key === 'E') {
     if (focused) held ? putBack() : pickUp();
   }
@@ -411,6 +531,7 @@ for (const b of document.querySelectorAll('[data-goto]')) {
     if (held) putBack();
     if (key === 'hero') return focus(hero);
     unfocus();
+    setActiveNav(key);
     const s = spots[key];
     controls.flyTo(s.pos, s.yaw, s.pitch);
   };
@@ -421,7 +542,7 @@ async function setSound(on) {
   if (on) await audio.start();
   else audio.stop();
   soundBtn.setAttribute('aria-pressed', String(on && audio.playing));
-  $('soundLabel').textContent = audio.playing ? 'Sound on' : 'Sound off';
+  $('soundLabel').textContent = audio.playing ? `${audio.info().bpm || 126} BPM` : 'Sound off';
 }
 soundBtn.onclick = () => setSound(!audio.playing);
 
@@ -430,8 +551,10 @@ function enter(withSound) {
   $('hud').hidden = false;
   if (withSound) setSound(true);
   controls.enabled = true;
-  if (controls.mouseLook) controls.lock();
-  else hint(isMobile ? 'Drag to look · tap the floor to walk · tap a shirt' : 'Drag to look · WASD / click the floor to walk · click a shirt', 6000);
+  if (controls.mouseLook) {
+    controls.lock();
+    showKeys(true, 9000);
+  } else hint(isMobile ? 'Drag to look · tap the floor to walk · tap a shirt' : 'Drag to look · WASD / click the floor to walk · click a shirt', 6000);
 }
 $('enterSound').onclick = () => enter(true);
 $('enterSilent').onclick = () => enter(false);
@@ -440,9 +563,9 @@ $('enterSilent').onclick = () => enter(false);
 // drawn so nothing stalls once you walk in.
 const sceneReady = (async () => {
   await texturesReady;
-  progressEl.style.width = '70%';
+  setProgress(70);
   await Promise.all([...tees, djTee].map((t) => t.ready));
-  progressEl.style.width = '85%';
+  setProgress(85);
   scene.traverse((o) => {
     const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
     for (const m of mats) for (const v of Object.values(m)) if (v && v.isTexture) renderer.initTexture(v);
@@ -450,10 +573,11 @@ const sceneReady = (async () => {
   try {
     await renderer.compileAsync(scene, camera);
   } catch {}
-  progressEl.style.width = '95%';
+  setProgress(95);
   warmFrames = 0;
   await new Promise((res) => (onWarm = res));
-  progressEl.style.width = '100%';
+  setProgress(100);
+  $('introLoad').hidden = true;
   $('enterActions').hidden = false;
 })();
 let warmFrames = -1;
@@ -477,7 +601,7 @@ const UP = new THREE.Vector3(0, 1, 0);
 const carryQuat = new THREE.Quaternion();
 function updateHeld(dt, t) {
   studioK += ((held ? 1 : 0) - studioK) * Math.min(1, dt * 3);
-  studio.intensity = 2.2 * studioK;
+  studio.intensity = 1.5 * studioK;
   grade.uniforms.uVig.value = 0.62 - 0.22 * studioK;
   holdYaw += (holdYawTarget - holdYaw) * Math.min(1, dt * 4);
   const carried = held || putting;
@@ -523,6 +647,7 @@ function updateReticle(dt) {
   reticleTimer = 0;
   const hit = pick(controls.centreEvent());
   reticle.classList.toggle('is-hot', !!hit);
+  if (hit) reticle.dataset.label = `Inspect · ${hit.object.userData.tee.product?.title || ''}`;
 }
 
 // resolution levels: [pixel ratio cap, floor reflection scale]
@@ -531,6 +656,10 @@ let govLevel = GOV.findIndex(([pr]) => pr <= pixelRatio + 1e-3);
 if (govLevel < 0) govLevel = 0;
 const govFloor = govLevel;
 let govTimer = -4; // let the first seconds settle before judging
+const rawHist = new Float32Array(90);
+let rawN = 0;
+let refreshMs = 16.7;
+const govFailedAt = [];
 let lastFrameAt = 0;
 function setGov(level) {
   govLevel = level;
@@ -541,6 +670,7 @@ function setGov(level) {
   resize();
 }
 let cpuAvg = 0;
+let navTimer = 0;
 let frames = 0;
 let benchMode = params.has('bench');
 function tick() {
@@ -556,6 +686,16 @@ function tick() {
   const info = audio.info();
   controls.update(dt);
   updateHeld(dt, clock.elapsedTime);
+  // lens: ease the field of view towards the product shot / walking value
+  const fovT = focused && !held ? FOCUS_FOV : BASE_FOV;
+  if (Math.abs(camera.fov - fovT) > 0.01) {
+    camera.fov += (fovT - camera.fov) * (1 - Math.exp(-dt * 3.2));
+    camera.updateProjectionMatrix();
+  }
+  if (!focused && (navTimer += dt) > 0.25) {
+    navTimer = 0;
+    setActiveNav(areaAt(controls.pos));
+  }
 
   const t = info.t;
   // HVAC breeze keeps the display piece alive when you are near it
@@ -583,6 +723,7 @@ function tick() {
   djTee.update(dt, { wind: [0, 0, 0], paused: djDist > 14 || !!held || !frustum.intersectsSphere(djSphere) });
   clothPool.flush();
   room.update(info);
+  details.update(info, clock.elapsedTime);
   if ((listenerTimer += dt) > 0.15) {
     listenerTimer = 0;
     audio.setListener(djDist);
@@ -603,18 +744,26 @@ function tick() {
   // Resolution governor: when frames are slow (e.g. a laptop in quiet /
   // battery mode), render fewer pixels until it is smooth again, and step
   // back up when there is headroom.
+  // The target is the display's own refresh rate (120 Hz and up on João's
+  // screen, 60 on most), measured from the fastest recent frames.
   const now = performance.now();
   const raw = lastFrameAt ? now - lastFrameAt : 16;
   lastFrameAt = now;
-  if (raw < 250) frameAvg = frameAvg * 0.94 + raw * 0.06;
+  if (raw < 250) {
+    frameAvg = frameAvg * 0.94 + raw * 0.06;
+    rawHist[rawN++ % rawHist.length] = raw;
+  }
   govTimer += dt;
-  if (govTimer > 1.2) {
-    if (frameAvg > 21 && govLevel < GOV.length - 1) {
+  if (govTimer > 1.2 && rawN >= rawHist.length) {
+    const sorted = Float32Array.from(rawHist).sort();
+    refreshMs = Math.min(34, Math.max(4, sorted[Math.floor(sorted.length * 0.2)]));
+    if (frameAvg > refreshMs * 1.3 + 0.5 && govLevel < GOV.length - 1) {
+      govFailedAt[govLevel] = now;
       setGov(govLevel + 1);
       govTimer = 0;
-    } else if (frameAvg < 12.5 && govLevel > govFloor) {
+    } else if (frameAvg < refreshMs * 1.06 && govLevel > govFloor && now - (govFailedAt[govLevel - 1] || -1e9) > 30000) {
       setGov(govLevel - 1);
-      govTimer = -6; // be slow to climb back so it does not flip-flop
+      govTimer = -4;
     }
   }
   requestAnimationFrame(tick);
@@ -622,4 +771,4 @@ function tick() {
 requestAnimationFrame(tick);
 
 // debugging hooks
-window.__khora = { stats: () => ({ updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded, workerMs: +clothStat.ms.toFixed(2), steps: { ...clothStat.steps }, info: { ...clothStat.info }, frames }), setBench: (b) => (benchMode = b), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };
+window.__khora = { renderer, stats: () => ({ refreshMs: +refreshMs.toFixed(2), gov: govLevel, frameMs: +frameAvg.toFixed(2), updateMs: +cpuAvg.toFixed(2), threaded: clothPool.threaded, workerMs: +clothStat.ms.toFixed(2), steps: { ...clothStat.steps }, info: { ...clothStat.info }, frames }), setBench: (b) => (benchMode = b), scene, camera, tees, hero, djTee, controls, audio, focus, pickUp, putBack, setHoldYaw: (y) => (holdYawTarget = y), spots };

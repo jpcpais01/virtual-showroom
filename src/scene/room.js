@@ -22,7 +22,7 @@ export function buildRoom(scene, reflection) {
   const cz = (ROOM.z0 + ROOM.z1) / 2;
 
   // ------------------------------------------------------------- floor
-  const fl = concrete({ base: [20, 21, 25], spread: 16, seed: 11, repeat: 6 });
+  const fl = concrete({ base: [20, 21, 25], spread: 16, seed: 11, repeat: 6, joint: 1.2 });
   const floorMat = new THREE.MeshStandardMaterial({
     map: fl.albedo,
     roughnessMap: fl.rough,
@@ -73,20 +73,7 @@ export function buildRoom(scene, reflection) {
   skirt(D - 0.1, ROOM.x0 + 0.03, cz, Math.PI / 2);
   skirt(D - 0.1, ROOM.x1 - 0.03, cz, Math.PI / 2);
 
-  // ceiling linear lights (shop area = cool white, near stage = blue)
-  const stripWhite = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xdfe6ff).multiplyScalar(1.6) });
-  const stripBlue = new THREE.MeshBasicMaterial({ color: BLUE.clone().multiplyScalar(3) });
-  const strips = [];
-  for (let i = 0; i < 7; i++) {
-    const z = 5.5 - i * 1.9;
-    const near = z < -3;
-    for (const x of [-4.6, 0, 4.6]) {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.02, 0.05), near ? stripBlue : stripWhite);
-      m.position.set(x, ROOM.h - 0.02, z);
-      group.add(m);
-      strips.push(m);
-    }
-  }
+  // (ceiling: baffles and suspended linear lights live in details.js)
 
   // vertical blue LED tubes along the side walls, pulsing with the kick
   const tubeMat = new THREE.MeshBasicMaterial({ color: BLUE.clone().multiplyScalar(4) });
@@ -276,8 +263,9 @@ export function buildRoom(scene, reflection) {
   key.shadow.camera.far = 9;
   key.shadow.radius = 3;
   group.add(key, key.target);
-  // blue rim from behind
-  const rim = new THREE.SpotLight(0x2d63ff, 55, 12, 0.4, 0.6, 2);
+  // blue rim from behind: paler than the brand blue so the back of a white
+  // tee still reads white (with a cool edge) instead of turning blue
+  const rim = new THREE.SpotLight(0x7d98ff, 34, 12, 0.4, 0.6, 2);
   rim.position.set(0.4, ROOM.h - 0.1, -2.2);
   rim.target.position.set(0, 1.6, 1.2);
   group.add(rim, rim.target);
@@ -302,7 +290,7 @@ export function buildRoom(scene, reflection) {
   // fake volumetric cone under the hero key spot (haze catching light)
   animated.push((info) => {
     const k = 1 + info.kick * 0.15 * info.energy;
-    rim.intensity = 55 * k;
+    rim.intensity = 34 * k;
   });
 
   return {
