@@ -695,16 +695,25 @@ export class Tee {
       this.liftT = Math.min(1, this.liftT + dt / 0.35);
       if (this.liftT < 1) tp = this._tmpV.copy(this.restPos).setY(this.restPos.y + 0.09 * this.liftT);
     }
+    // Move like a hand would: accelerate and brake smoothly (limited
+    // acceleration, no jerk). Snapping to full speed at once flung the
+    // sleeves back behind the body, where they stayed tucked.
     const d = this._tmpD.copy(tp).sub(lp);
-    const step = d.clone().multiplyScalar(1 - Math.exp(-dt * 7));
-    const maxStep = 2.6 * dt; // m/s
-    if (step.length() > maxStep) step.setLength(maxStep);
-    lp.add(step);
+    const dist = d.length();
+    const vel = (this.liveVel ||= new THREE.Vector3());
+    const A = 5.0; // m/s^2
+    const VMAX = 1.7; // m/s
+    const want = dist > 1e-6 ? d.multiplyScalar(Math.min(VMAX, Math.sqrt(2 * A * dist) * 0.9, dist / Math.max(dt, 1e-3)) / dist) : d.set(0, 0, 0);
+    const dv = want.sub(vel);
+    const dvl = dv.length();
+    if (dvl > A * dt) dv.multiplyScalar((A * dt) / dvl);
+    vel.add(dv);
+    lp.addScaledVector(vel, dt);
     // turn gently (angular speed capped) so the sleeves swing, not flip
     const ang = lq.angleTo(this.carryQuat);
     if (ang > 1e-5) {
-      const want = ang * (1 - Math.exp(-dt * 4));
-      lq.rotateTowards(this.carryQuat, Math.min(want, 2.2 * dt));
+      const wantA = ang * (1 - Math.exp(-dt * 4));
+      lq.rotateTowards(this.carryQuat, Math.min(wantA, 1.8 * dt));
     }
     this.liveMatrix.compose(lp, lq, this._one);
     this.hanger.matrix.copy(this.liveMatrix);

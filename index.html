@@ -9,53 +9,79 @@
     <link rel="icon" href="textures/monogram.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
     <canvas id="scene"></canvas>
 
     <div id="intro" class="intro">
+      <div class="intro__glow" aria-hidden="true"></div>
       <div class="intro__inner">
+        <p class="intro__eyebrow">Drop 01 · Live now</p>
         <img class="intro__word" src="textures/wordmark.png" alt="KHORA" />
         <p class="intro__sub">Virtual showroom</p>
-        <div class="intro__progress"><span id="progress"></span></div>
+        <div class="intro__load" id="introLoad">
+          <div class="intro__progress"><span id="progress"></span></div>
+          <p class="intro__pct"><span id="progressPct">0</span>%</p>
+        </div>
         <div class="intro__actions" id="enterActions" hidden>
           <button id="enterSound" class="btn btn--primary">Enter with sound</button>
           <button id="enterSilent" class="btn btn--ghost">Enter muted</button>
         </div>
-        <p class="intro__hint">Move the mouse to look around · WASD to walk · Click a piece to inspect it · Esc shows the cursor</p>
+        <ul class="keys keys--intro" id="introKeys">
+          <li><span class="keys__cap keys__cap--wide">Mouse</span> Look around</li>
+          <li><span class="keys__cap">W</span><span class="keys__cap">A</span><span class="keys__cap">S</span><span class="keys__cap">D</span> Walk</li>
+          <li><span class="keys__cap keys__cap--wide">Click</span> Inspect a piece</li>
+          <li><span class="keys__cap">E</span> Pick up / put back</li>
+          <li><span class="keys__cap keys__cap--wide">Shift</span> Walk faster</li>
+          <li><span class="keys__cap keys__cap--wide">Esc</span> Show the cursor</li>
+        </ul>
+        <p class="intro__hint" id="introHint" hidden></p>
       </div>
     </div>
 
     <header class="hud hud--top" id="hud" hidden>
-      <img class="hud__word" src="textures/wordmark.png" alt="KHORA" />
+      <div class="hud__brand">
+        <img class="hud__word" src="textures/wordmark.png" alt="KHORA" />
+        <span class="hud__tag">Drop 01</span>
+      </div>
       <nav class="hud__nav" aria-label="Areas">
+        <button data-goto="entrance">Overview</button>
         <button data-goto="hero">Display</button>
         <button data-goto="rail">Rail</button>
         <button data-goto="booth">DJ booth</button>
-        <button data-goto="entrance">Overview</button>
       </nav>
+      <button class="hud__icon" id="helpToggle" aria-pressed="false" title="Controls (H)">?</button>
       <button class="hud__sound" id="soundToggle" aria-pressed="false" title="Music">
         <span class="eq"><i></i><i></i><i></i><i></i></span>
         <span id="soundLabel">Sound off</span>
       </button>
     </header>
 
+    <aside class="keys-panel" id="keysPanel" hidden>
+      <p class="keys-panel__title">Controls</p>
+      <ul class="keys" id="hudKeys"></ul>
+    </aside>
+
     <aside class="panel" id="panel" hidden aria-live="polite">
-      <button class="panel__close" id="panelClose" aria-label="Close">×</button>
-      <p class="panel__eyebrow">KHORA · Drop 01</p>
+      <div class="panel__top">
+        <p class="panel__eyebrow">KHORA · Drop 01</p>
+        <div class="panel__pager">
+          <button class="panel__arrow" id="prevPiece" aria-label="Previous piece">‹</button>
+          <span class="panel__count" id="pieceCount">01 / 02</span>
+          <button class="panel__arrow" id="nextPiece" aria-label="Next piece">›</button>
+          <button class="panel__close" id="panelClose" aria-label="Close">×</button>
+        </div>
+      </div>
       <h1 class="panel__title">Heart Tee</h1>
       <p class="panel__colour"><span class="swatch swatch--white"></span> White / Royal blue</p>
+      <dl class="panel__specs" id="panelSpecs"></dl>
       <ul class="panel__list">
         <li>Oversized, dropped shoulder</li>
-        <li>Embroidered K♡ monogram on the chest</li>
-        <li>Royal blue thorn-heart print on the back</li>
-        <li>Woven KHORA neck label</li>
-        <li>Cotton jersey, rib collar</li>
       </ul>
       <div class="panel__actions">
-        <button class="btn btn--primary" id="pickBtn">Pick it up</button>
+        <button class="btn btn--primary" id="pickBtn"><span id="pickLabel">Pick it up</span><kbd class="btn__key">E</kbd></button>
         <button class="btn btn--ghost" id="turnBtn" hidden>Turn around</button>
       </div>
       <p class="panel__hint" id="panelHint">Drag the fabric to pull it. Click and hold anywhere on the shirt.</p>
