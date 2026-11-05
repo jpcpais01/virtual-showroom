@@ -91,7 +91,8 @@ const KINDS = {
     rims: [['neck', 0.0042, 8], ['cuffR', 0.0022, 6], ['cuffL', 0.0022, 6], ['hem', 0.0022, 6]],
     rimColor: 0xefeee9,
     rimSheen: 0xd8dae6,
-    pinLift: 0.006,
+    pinLift: 0.003,
+    hangClear: 0.017,
     warm: 180,
   },
   socks: {
@@ -177,6 +178,11 @@ export class Tee {
     this.tex = K.textures(renderer);
     this.group = new THREE.Group();
     this.group.name = name;
+    // the fabric (mesh, rolled edges, label); its matrix carries the solved
+    // shape to the hanger's current pose
+    this.clothRoot = new THREE.Group();
+    this.clothRoot.matrixAutoUpdate = false;
+    this.group.add(this.clothRoot);
     this.hangerMatrix = hangerMatrix.clone();
     this.state = 'hanging'; // hanging | lifting | held | returning
     this.sleepTimer = 0;
@@ -199,7 +205,10 @@ export class Tee {
       // hanging: nearly flat; worn: opened up around the body
       const wgt = Math.min(1, d / (worn ? 0.09 : 0.07));
       const depth = worn ? worn.depth : K.depth;
-      const z = (v.z0 || 0) + (v.panel === FRONT ? depth * wgt : v.panel === BACK ? -depth * wgt : 0);
+      // start each layer on its own side of the hanger arm, clear of it, so
+      // nothing begins inside the hanger and gets pushed out the wrong side
+      const open = worn ? depth * wgt : Math.max(depth * wgt, K.hangClear || 0);
+      const z = (v.z0 || 0) + (v.panel === FRONT ? open : v.panel === BACK ? -open : 0);
       local.set(v.x, v.y, z).applyMatrix4(this.hangerMatrix);
       init.set([local.x, local.y, local.z], 3 * i);
       rest.set([v.x, v.y, z], 3 * i);
@@ -285,10 +294,12 @@ export class Tee {
       this._buildHanger();
       for (const id of pat.hangerIds) {
         const v = pat.verts[id];
+        if (K.pinSpan && Math.abs(v.x) > K.pinSpan) continue;
         // the clip/hanger pinches both layers together at its line
         this.hangerLocal.set(id, new THREE.Vector3(v.x, v.y + K.pinLift, v.z0 || 0));
       }
       this._pinToHanger(true);
+      this._buildTethers(K.tetherSlack || 1.03);
       this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
       this.restPos = new THREE.Vector3();
       this.restQuat = new THREE.Quaternion();
@@ -318,7 +329,11 @@ export class Tee {
   _onResult(r) {
     const c = this.cloth;
     if (r.pos) {
-      // take the solved state, except particles the main thread is driving
+      // what gets drawn: the solved state as a whole (see _updateClothFrame)
+      this.rpos = r.pos;
+      this.rnrm = r.nrm;
+      this.simMat = r.tag ? (this._simMat ||= new THREE.Matrix4()).fromArray(r.tag) : null;
+      // main-thread copy (picking, grabbing), except particles it drives
       const w = c.invMass;
       for (let i = 0; i < c.n; i++) {
         if (w[i] === 0) continue;
@@ -341,6 +356,22 @@ export class Tee {
       this.dirty = false;
       this._readyRes();
     }
+  }
+
+  /**
+   * The solve runs a frame or so behind and at a fixed 60 Hz, while the
+   * hanger moves every frame (120 Hz and up). Drawing the solved fabric as-is
+   * made it trail the hanger and judder against it while carried or turned.
+   * So the fabric is drawn from the solved state *including* its hanger
+   * points, then carried rigidly (one matrix, no per-vertex work) from the
+   * hanger pose it was solved for to where the hanger is now: hanger and
+   * shoulders always line up, and only the swing of the fabric is a step
+   * behind, which the eye can't see.
+   */
+  _updateClothFrame() {
+    const m = this.clothRoot.matrix;
+    if (this.simMat && this.liveMatrix) m.copy(this.simMat).invert().premultiply(this.liveMatrix);
+    else m.identity();
   }
 
   // ------------------------------------------------------------ render mesh
@@ -431,7 +462,7 @@ export class Tee {
     this.mesh.receiveShadow = false;
     this.mesh.frustumCulled = false;
     this.mesh.userData.tee = this;
-    this.group.add(this.mesh);
+    this.clothRoot.add(this.mesh);
   }
 
   _buildRims() {
@@ -470,7 +501,7 @@ export class Tee {
       mesh.castShadow = true;
       mesh.frustumCulled = false;
       mesh.userData.tee = this;
-      this.group.add(mesh);
+      this.clothRoot.add(mesh);
       this.rims.push({ loop, r, seg, geo, mesh });
     }
   }
@@ -480,7 +511,7 @@ export class Tee {
     const mat = new THREE.MeshStandardMaterial({ map: this.tex.label, roughness: 0.55, side: THREE.DoubleSide });
     this.label = new THREE.Mesh(geo, mat);
     this.label.matrixAutoUpdate = false;
-    this.group.add(this.label);
+    this.clothRoot.add(this.label);
   }
 
   _buildHanger() {
@@ -540,15 +571,25 @@ export class Tee {
     const body = new THREE.MeshStandardMaterial({ color: 0x0b0b0e, metalness: 0.2, roughness: 0.45 });
     const P = this.pat.pattern;
     const pts = [];
-    const span = 0.185; // arm ends stay hidden inside the shoulders
-    for (let i = -20; i <= 20; i++) {
-      const x = (i / 20) * span;
+    // The arm reaches past the last pinned shoulder point (a hanger that
+    // stops short leaves the outer pins holding the sleeve up in mid-air,
+    // which over-stretched the fabric there) and sits right under the
+    // shoulder seam, the way a shirt really rests on a hanger.
+    const span = 0.214; // = the outermost pinned shoulder point
+    const DROP = 0.013; // arm centre below the seam line
+    const armPt = (x, drop) => {
       const ax = Math.abs(x);
       // follow shoulder slope beyond the neck point
       const y = ax < P.N[0] ? 0.012 - (ax / P.N[0]) * 0.012 : -((ax - P.N[0]) / (P.S[0] - P.N[0])) * -P.S[1];
-      pts.push(new THREE.Vector3(x, y - 0.022, 0));
-    }
-    const curve = new THREE.CatmullRomCurve3(pts);
+      return new THREE.Vector3(x, y - drop, 0);
+    };
+    for (let i = -20; i <= 20; i++) pts.push(armPt((i / 20) * span, DROP));
+    // the visible arm stops a little short of the collider and sits a few mm
+    // lower, so its tips can never show through the fabric at the shoulders
+    const VIS = 0.194;
+    const vis = [];
+    for (let i = -20; i <= 20; i++) vis.push(armPt((i / 20) * VIS, DROP + 0.003));
+    const curve = new THREE.CatmullRomCurve3(vis);
     // the cloth wraps over the hanger arm: capsule colliders along it
     this.hangerColliders = [];
     this.capsLocal = [];
@@ -556,23 +597,25 @@ export class Tee {
       this.capsLocal.push([pts[i].clone(), pts[Math.min(i + 5, pts.length - 1)].clone()]);
       const a = pts[i].clone().applyMatrix4(this.hangerMatrix);
       const b = pts[Math.min(i + 5, pts.length - 1)].clone().applyMatrix4(this.hangerMatrix);
-      // thin: the solver pads colliders by half the cloth thickness, and the
-      // shoulder seam is pinned right on this line, so a fat capsule kept
-      // shoving the fabric next to the seam and made it buzz on the hanger
-      this.hangerColliders.push({ type: 'capsule', a: a.toArray(), b: b.toArray(), r: 0.012 });
+      // The solver pads colliders by half the cloth thickness (1 cm), so the
+      // fabric wraps at ~14 mm from the arm's centre: just outside the 6.5 mm
+      // visible tube, and its top meets the pinned seam. (A fatter, lower
+      // collider forced the fabric to stretch ~35% over the hanger, which made
+      // shoulder bumps and a constant buzz there.)
+      this.hangerColliders.push({ type: 'capsule', a: a.toArray(), b: b.toArray(), r: 0.004 });
     }
     this.cloth.colliders = [...Tee.environment, ...this.hangerColliders];
-    const arm = new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.0065, 12, false), body);
+    const arm = new THREE.Mesh(new THREE.TubeGeometry(curve, 60, 0.006, 12, false), body);
     arm.castShadow = true;
     g.add(arm);
     for (const s of [-1, 1]) {
-      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.0065, 16, 12), body);
-      cap.position.copy(pts[s < 0 ? 0 : pts.length - 1]);
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(0.006, 16, 12), body);
+      cap.position.copy(vis[s < 0 ? 0 : vis.length - 1]);
       g.add(cap);
     }
     const hook = new THREE.CurvePath();
     const hookPts = [
-      new THREE.Vector3(0, -0.012, 0),
+      new THREE.Vector3(0, -0.004, 0),
       new THREE.Vector3(0, 0.07, 0),
       new THREE.Vector3(0, 0.1, 0.0),
       new THREE.Vector3(0, 0.125, -0.02),
@@ -590,6 +633,29 @@ export class Tee {
   }
 
   // ------------------------------------------------------------ pinning
+  _buildTethers(slack) {
+    // each particle is tied to its nearest hanger point by the straight-line
+    // distance across its flat pattern piece (never shorter than the fabric
+    // between them, so it only stops over-stretching, it never pulls)
+    const pat = this.pat;
+    const UX = (v) => v.ux ?? v.x;
+    const UY = (v) => v.uy ?? v.y;
+    const pins = [...this.hangerLocal.keys()];
+    const T = [];
+    pat.verts.forEach((v, i) => {
+      if (this.hangerLocal.has(i)) return;
+      let best = -1, bd = Infinity;
+      for (const p of pins) {
+        const q = pat.verts[p];
+        if (q.sock !== undefined && v.sock !== undefined && q.sock !== v.sock) continue;
+        const d = Math.hypot(UX(q) - UX(v), UY(q) - UY(v));
+        if (d < bd) { bd = d; best = p; }
+      }
+      if (best >= 0) T.push(i, best, bd * slack + 0.004);
+    });
+    this.cloth.tether = new Float32Array(T);
+  }
+
   _pinToHanger() {
     for (const [id, lp] of this.hangerLocal) {
       const target = lp.clone().applyMatrix4(this.hangerMatrix);
@@ -726,8 +792,10 @@ export class Tee {
     const c = this.cloth;
     if (this.hanger && this.state !== 'hanging' && this.state !== 'worn') this._moveHanger(dt);
     if (wind) c.wind = wind;
+    // keep the fabric locked to the hanger between solver results
+    this._updateClothFrame();
     if (dt > 0 && !this.asleep && !paused && this.isReady) {
-      clothPool.request(this.poolId, dt);
+      clothPool.request(this.poolId, dt, this.liveMatrix ? this.liveMatrix.elements.slice() : null);
       // sleep when settled on the hanger to save CPU
       // a garment left alone on its hanger comes to rest (real fabric has
       // internal friction), then sleeps
@@ -755,8 +823,8 @@ export class Tee {
   _writeRenderMesh() {
     const pos = this.geometry.attributes.position.array;
     const nrm = this.geometry.attributes.normal.array;
-    const P = this.cloth.pos;
-    const Nn = this.cloth.normals;
+    const P = this.rpos || this.cloth.pos;
+    const Nn = this.rnrm || this.cloth.normals;
     const RA = this.rA, RB = this.rB, RC = this.rC, WA = this.wA, WB = this.wB, WC = this.wC;
     const alpha = 0.65; // Phong tessellation shape factor
     for (let r = 0, n = RA.length; r < n; r++) {
@@ -787,8 +855,8 @@ export class Tee {
   }
 
   _writeRims() {
-    const P = this.cloth.pos;
-    const Nn = this.cloth.normals;
+    const P = this.rpos || this.cloth.pos;
+    const Nn = this.rnrm || this.cloth.normals;
     const S = this.SUB;
     const alpha = 0.65;
     const t = new THREE.Vector3(), n = new THREE.Vector3(), b = new THREE.Vector3();
@@ -845,8 +913,8 @@ export class Tee {
   }
 
   _writeLabel() {
-    const P = this.cloth.pos;
-    const Nn = this.cloth.normals;
+    const P = this.rpos || this.cloth.pos;
+    const Nn = this.rnrm || this.cloth.normals;
     const at = (i) => new THREE.Vector3(P[3 * i], P[3 * i + 1], P[3 * i + 2]);
     const c = at(this.pat.labelAnchor);
     const up = at(this.pat.labelAnchorUp).sub(c).normalize();

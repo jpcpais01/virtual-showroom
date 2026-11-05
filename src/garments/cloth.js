@@ -130,6 +130,11 @@ export class Cloth {
     this.baseInvMass = new Float32Array(this.invMass);
     this.stretch = o.stretch;
     this.bend = o.bend;
+    // long-range attachments [i, anchor, maxDist, ...]: a particle may never be
+    // farther from its hanger point than the fabric between them allows.
+    // Without these, the few solver iterations we can afford let the weight of
+    // the whole shirt stretch the fabric next to the hanger by ~30%.
+    this.tether = o.tether || null;
 
     this.stretchCompliance = 2e-7;
     this.bendCompliance = 0.025;
@@ -256,6 +261,7 @@ export class Cloth {
       this._solveDistances(this.stretch, this.stretchCompliance / (sdt * sdt));
       if (this.substeps < 5) this._solveDistances(this.stretch, this.stretchCompliance / (sdt * sdt));
       this._solveDistances(this.bend, this.bendCompliance / (sdt * sdt));
+      if (this.tether) this._solveTethers();
       if (this.selfCollision) this._solveSelf();
       this._solveColliders();
       const inv = 1 / sdt;
@@ -318,6 +324,26 @@ export class Cloth {
       pos[j3] -= dx * s * wj;
       pos[j3 + 1] -= dy * s * wj;
       pos[j3 + 2] -= dz * s * wj;
+    }
+  }
+
+  _solveTethers() {
+    const pos = this.pos;
+    const w = this.invMass;
+    const T = this.tether;
+    for (let k = 0; k < T.length; k += 3) {
+      const i = T[k];
+      const a = T[k + 1];
+      if (w[a] !== 0 || w[i] === 0) continue; // only while the anchor is held
+      const i3 = 3 * i, a3 = 3 * a;
+      const dx = pos[i3] - pos[a3], dy = pos[i3 + 1] - pos[a3 + 1], dz = pos[i3 + 2] - pos[a3 + 2];
+      const d2 = dx * dx + dy * dy + dz * dz;
+      const L = T[k + 2];
+      if (d2 <= L * L) continue;
+      const s = L / Math.sqrt(d2);
+      pos[i3] = pos[a3] + dx * s;
+      pos[i3 + 1] = pos[a3 + 1] + dy * s;
+      pos[i3 + 2] = pos[a3 + 2] + dz * s;
     }
   }
 

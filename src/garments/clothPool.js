@@ -82,6 +82,7 @@ export const clothPool = {
         tris: cloth.tris,
         stretch: cloth.stretch,
         bend: cloth.bend,
+        tether: cloth.tether,
       },
       state: { pos: cloth.pos, vel: cloth.vel, invMass: cloth.invMass, colliders: cloth.colliders },
       params: {
@@ -101,7 +102,7 @@ export const clothPool = {
     return id;
   },
   /** queue this frame's input for one garment */
-  request(id, dt) {
+  request(id, dt, tag = null) {
     const m = members.get(id);
     m.dtAcc += dt;
     const c = m.cloth;
@@ -115,6 +116,9 @@ export const clothPool = {
       wind: c.wind,
       colliderFriction: c.colliderFriction,
       damping: c.damping,
+      // echoed back with the result: lets the garment know which hanger pose
+      // a solved state belongs to
+      tag,
     };
   },
   /** send all queued jobs (once per frame) */
